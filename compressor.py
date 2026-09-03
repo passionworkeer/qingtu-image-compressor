@@ -82,6 +82,17 @@ def fs_path(path: Path) -> Path:
     return Path("\\\\?\\" + text)
 
 
+def is_appledouble_file(path: Path) -> bool:
+    """Identify macOS AppleDouble sidecars without hiding a real image by name alone."""
+    if not path.name.startswith("._"):
+        return False
+    try:
+        with fs_path(path).open("rb") as handle:
+            return handle.read(4) == b"\x00\x05\x16\x07"
+    except OSError:
+        return False
+
+
 def is_link_like(entry, info) -> bool:
     """Skip path redirects, while allowing ordinary hydrated cloud files."""
     if entry.is_symlink():
@@ -361,6 +372,8 @@ def process_file(source: Path, destination: Path, target: int, occupied: set[str
                  cancel: threading.Event):
     source = fs_path(source)
     before = source.stat().st_size
+    if is_appledouble_file(source):
+        return None, "macOS 元数据已跳过", "外接盘的 AppleDouble 元数据，不是真实图片", before, 0
     ext = source.suffix.lower()
     with warnings.catch_warnings():
         warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -486,12 +499,24 @@ def normalize_sources(source) -> tuple[Path, str, list[Path] | None]:
 
 def run_batch(source, target_bytes: int = 1_000_000,
               cancel: threading.Event | None = None,
-              emit: Callable[[dict], None] | None = None) -> BatchResult:
+              emit: Callable[[dict], None] | None = None,
+              output_parent: str | os.PathLike | None = None) -> BatchResult:
     if not isinstance(target_bytes, int) or target_bytes < 10_000:
         raise ValueError("目标大小至少为 0.01 MB")
     root, source_name, selected = normalize_sources(source)
     if root.parent == root:
         raise ValueError("请选择磁盘内的文件夹，不能直接选择磁盘根目录")
+    if output_parent is not None:
+        destination_parent = Path(output_parent).expanduser().absolute()
+        try:
+            info = fs_path(destination_parent).lstat()
+        except (FileNotFoundError, OSError):
+            raise ValueError("导出位置不存在或无法访问，请重新选择") from None
+        if is_link_like(fs_path(destination_parent), info) or not fs_path(destination_parent).is_dir():
+            raise ValueError("导出位置必须是可访问的实际文件夹")
+        destination_parent = destination_parent.resolve()
+    else:
+        destination_parent = root if selected is not None else root.parent
     cancel = cancel if cancel is not None else threading.Event()
     emit = emit or (lambda event: None)
     if selected is None:
@@ -501,7 +526,7 @@ def run_batch(source, target_bytes: int = 1_000_000,
         items = [(path.relative_to(root), "file", "") for path in sorted(selected, key=lambda p: name_key(p.name))]
         reserved = {Path("."): {name_key(entry.name) for entry in fs_path(root).iterdir()}}
     check_cancel(cancel)
-    output = new_output(root if selected is not None else root.parent, source_name)
+    output = new_output(destination_parent, source_name)
     report = output / reserve_name("_压缩报告.csv", reserved.setdefault(Path("."), set()))
     result = BatchResult(output=output, report=report, total=len(items))
     emit({"type": "start", "total": result.total, "output": str(output)})

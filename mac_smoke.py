@@ -22,6 +22,8 @@ with tempfile.TemporaryDirectory() as folder:
     app = bundle / "Contents" / "MacOS" / "轻图图片压缩"
     source = Path(folder) / "测试图"
     source.mkdir()
+    export_parent = Path(folder) / "本机导出位置"
+    export_parent.mkdir()
     picture = source / "深层" / "大图.jpg"
     picture.parent.mkdir()
     Image.effect_noise((2400, 1800), 85).convert("RGB").save(picture, quality=100)
@@ -29,20 +31,25 @@ with tempfile.TemporaryDirectory() as folder:
     non_images = [source / "深层" / "视频.mov", source / "说明.txt"]
     for path in non_images:
         path.write_bytes(b"not an image" * 1000)
+    appledouble = source / "深层" / "._大图.jpg"
+    appledouble.write_bytes(b"\x00\x05\x16\x07" + b"metadata" * 512)
     for fmt, suffix in (("HEIF", "heic"), ("WEBP", "webp"), ("AVIF", "avif"), ("PNG", "png")):
         with Image.effect_noise((1000, 800), 90).convert("RGB") as sample:
             sample.save(source / f"编码器.{suffix}", format=fmt, quality=100)
     result_path = Path(folder) / "result.json"
     run = subprocess.run([str(app), "--batch", str(source), "--target-mb", "0.1",
-                          "--result-json", str(result_path)], timeout=180)
+                          "--output-dir", str(export_parent), "--result-json", str(result_path)], timeout=180)
     assert run.returncode == 0
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    assert result["processed"] == result["total"] == 7 and result["errors"] == 0
-    assert result["compressed"] == 5 and result["other"] == 2
+    assert result["processed"] == result["total"] == 8 and result["errors"] == 0
+    assert result["compressed"] == 5 and result["other"] == 3
     assert result["skipped"] == 0
+    assert Path(result["output"]).parent == export_parent
     for path in non_images:
         assert not (Path(result["output"]) / path.relative_to(source)).exists()
         assert path.read_bytes() == b"not an image" * 1000
+    assert not (Path(result["output"]) / appledouble.relative_to(source)).exists()
+    assert appledouble.read_bytes().startswith(b"\x00\x05\x16\x07")
     assert hashlib.sha256(picture.read_bytes()).hexdigest() == before
     output = next((Path(result["output"]) / "深层").glob("*.jpg"))
     assert output.stat().st_size <= 100_000
@@ -52,6 +59,8 @@ with tempfile.TemporaryDirectory() as folder:
         rows = list(csv.DictReader(handle))
     ignored = [row for row in rows if row["状态"] == "非图片已跳过"]
     assert len(ignored) == 2 and all(row["输出文件"] == "" for row in ignored)
+    metadata = [row for row in rows if row["状态"] == "macOS 元数据已跳过"]
+    assert len(metadata) == 1 and metadata[0]["输出文件"] == ""
     for row in rows:
         if not row["输出文件"]:
             continue

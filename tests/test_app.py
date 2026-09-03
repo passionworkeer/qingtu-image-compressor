@@ -139,3 +139,26 @@ def test_gui_accepts_single_image_drop(tmp_path):
         assert (app.result.output / source.name).exists()
     finally:
         close_after_worker(app)
+
+
+def test_gui_can_export_external_source_to_chosen_local_folder(tmp_path):
+    source = tmp_path / "外接盘" / "照片"
+    export_parent = tmp_path / "本机" / "导出"
+    export_parent.mkdir(parents=True)
+    source.mkdir(parents=True)
+    Image.new("RGB", (100, 80), "blue").save(source / "成片.jpg")
+    app = App()
+    try:
+        app._set_sources([source])
+        app._set_export_parent(export_parent)
+        assert str(export_parent) in app.export_path_text.get()
+        app.start_button.invoke()
+        wait_until_finished(app)
+        assert app.result.errors == 0
+        assert app.result.output.parent == export_parent
+        assert (app.result.output / "成片.jpg").exists()
+        app._set_export_parent(None)
+        assert app.export_parent is None
+        assert "默认" in app.export_path_text.get()
+    finally:
+        close_after_worker(app)

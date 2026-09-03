@@ -1,4 +1,5 @@
 import errno
+import csv
 import hashlib
 import threading
 from types import SimpleNamespace
@@ -24,6 +25,76 @@ def test_single_image_creates_sibling_result_folder(tmp_path):
     assert result.output.parent == source.parent
     assert (result.output / source.name).read_bytes() == original
     assert source.read_bytes() == original
+
+
+def test_macos_appledouble_jpg_is_metadata_not_a_broken_photo(tmp_path):
+    source = tmp_path / "外接硬盘照片"
+    real = image(source / "Lab Fitting0139.jpg")
+    real_dot_name = image(source / "._真实照片.jpg")
+    sidecar = source / "._Lab Fitting0139.jpg"
+    sidecar.write_bytes(b"\x00\x05\x16\x07" + b"metadata" * 512)
+    original = {path: path.read_bytes() for path in (real, real_dot_name, sidecar)}
+
+    result = run_batch(source)
+
+    assert result.errors == result.skipped == 0
+    assert result.unchanged == 2 and result.other == 1
+    assert (result.output / real.name).is_file()
+    assert (result.output / real_dot_name.name).is_file()
+    assert not (result.output / sidecar.name).exists()
+    assert all(path.read_bytes() == data for path, data in original.items())
+    with result.report.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    metadata = next(row for row in rows if row["原文件"] == sidecar.name)
+    assert metadata["状态"] == "macOS 元数据已跳过"
+    assert metadata["输出文件"] == ""
+
+
+def test_custom_output_parent_keeps_result_off_source_volume(tmp_path):
+    external_drive = tmp_path / "外接盘" / "本次拍摄"
+    local_export = tmp_path / "本机磁盘" / "导出位置"
+    local_export.mkdir(parents=True)
+    photo = image(external_drive / "第一组" / "成片.jpg")
+    original = photo.read_bytes()
+
+    result = run_batch(external_drive, output_parent=local_export)
+
+    assert result.output.parent == local_export
+    assert result.output.name == "本次拍摄_已压缩"
+    assert (result.output / "第一组" / "成片.jpg").read_bytes() == original
+    assert photo.read_bytes() == original
+
+
+def test_custom_output_parent_must_be_an_existing_directory(tmp_path):
+    source = image(tmp_path / "照片.jpg")
+    with pytest.raises(ValueError, match="导出位置"):
+        run_batch(source, output_parent=tmp_path / "不存在")
+    file_target = tmp_path / "不是目录.txt"
+    file_target.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="导出位置"):
+        run_batch(source, output_parent=file_target)
+
+
+def test_camera_batch_with_120_photos_and_appledouble_sidecars(tmp_path):
+    source = tmp_path / "外接盘" / "整场拍摄"
+    export_parent = tmp_path / "本机导出"
+    export_parent.mkdir()
+    originals = {}
+    for index in range(120):
+        folder = source / f"机位{index % 4 + 1}"
+        photo = image(folder / f"成片{index:04}.jpg")
+        sidecar = folder / f"._成片{index:04}.jpg"
+        sidecar.write_bytes(b"\x00\x05\x16\x07" + index.to_bytes(4, "big") + b"metadata")
+        originals[photo] = photo.read_bytes()
+        originals[sidecar] = sidecar.read_bytes()
+
+    result = run_batch(source, output_parent=export_parent)
+
+    assert result.total == result.processed == 240
+    assert result.unchanged == result.other == 120
+    assert result.errors == result.skipped == result.preserved == 0
+    assert len(list(result.output.rglob("*.jpg"))) == 120
+    assert all(path.read_bytes() == data for path, data in originals.items())
 
 
 def test_multiple_images_same_parent_deduplicated(tmp_path):

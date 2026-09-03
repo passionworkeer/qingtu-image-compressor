@@ -1,8 +1,10 @@
 # 轻图：图片压缩
 
-Windows / macOS 本地桌面应用。可拖入单图、同一目录中的多张图片，或一个完整文件夹。文件夹会遍历所有子目录并保留目录结构；原图只读。默认 1 MB = 1,000,000 字节。
+Windows / macOS 本地桌面应用。可拖入单图、同一目录中的多张图片，或一个完整文件夹。文件夹会遍历所有子目录并保留目录结构；原图只读。默认 1 MB = 1,000,000 字节。可选择导出位置；程序会在所选位置中新建带“_已压缩”的结果文件夹，适合从外接硬盘读取并输出到本机磁盘。未选择时沿用原目录旁生成副本的行为。
 
 视频、文档等非图片文件不复制到结果目录，CSV 记录为“非图片已跳过”，不算异常，也不计入压缩节省量。图片仍按内容识别，无后缀或错后缀图片不会仅因文件名被忽略；不支持的图片格式仍保留原件并提示。只有非图片的文件夹会明确显示“没有可处理的图片”。
+
+macOS 在 exFAT 等外接盘上可能生成约 4 KB、名称为 `._原文件名.jpg` 的 AppleDouble 元数据文件。应用会同时核对名称和 AppleDouble 文件头，将其记录为“macOS 元数据已跳过”，不会误报为损坏图片；仅仅名称以 `._` 开头的真实图片仍会正常处理。压缩始终逐张读取和写入，不会一次加载整个文件夹。
 
 ## 开发
 
@@ -41,7 +43,7 @@ GitHub Actions 工作流 `.github/workflows/build-macos.yml` 会在 `macos-15`�
 命令行验收入口（窗口版 EXE 不输出控制台，请指定 JSON）：
 
 ```powershell
-Start-Process -FilePath '.\dist\图片压缩工具.exe' -ArgumentList '--batch "D:\图片" --target-mb 1 --result-json "D:\验收结果.json"' -Wait -WindowStyle Hidden
+Start-Process -FilePath '.\dist\图片压缩工具.exe' -ArgumentList '--batch "E:\外接盘图片" --output-dir "D:\本机导出" --target-mb 1 --result-json "D:\验收结果.json"' -Wait -WindowStyle Hidden
 ```
 
 退出码：0 全部正常完成；2 含保留未压缩/跳过/异常或写入中止；1 启动级错误。

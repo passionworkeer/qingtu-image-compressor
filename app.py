@@ -42,7 +42,7 @@ class App(TkinterDnD.Tk):
         self.title("轻图 · 批量图片压缩")
         self.configure(bg=BG)
         self.geometry(f"920x{min(820, self.winfo_screenheight() - 80)}")
-        self.minsize(780, 620)
+        self.minsize(780, 665)
         icon = Path(__file__).with_name("app.ico")
         if icon.exists():
             try:
@@ -63,9 +63,11 @@ class App(TkinterDnD.Tk):
         self.sources = [initial] if initial and fs_path(initial).exists() else []
         self.path = tk.StringVar(value=str(initial) if initial else "")
         self.target = tk.StringVar(value="1")
+        self.export_parent = None
+        self.export_path_text = tk.StringVar(value="默认：原文件夹旁边")
         self.state_text = tk.StringVar(value="准备就绪")
         self.detail_text = tk.StringVar(value="选择文件夹后，点击开始压缩。")
-        self.output_text = tk.StringVar(value="文件夹生成同级副本；单图生成在图片所在目录。原件始终不改。")
+        self.output_text = tk.StringVar(value="可在上方选择导出位置；不选择时生成同级副本。原件始终不改。")
         self.metrics = tk.StringVar(value="已处理 0 项    ·    节省 0 B")
         self.cancel_event = threading.Event()
         self.events = queue.Queue(maxsize=300)
@@ -139,6 +141,15 @@ class App(TkinterDnD.Tk):
         self.choose_images_button.pack(side="right", padx=(0, 8))
         self.label(card, "选文件夹会下钻全部子目录；单图和同一目录中的多图也可一次处理。", fg=MUTED,
                    font=(self.font_family, 9)).pack(fill="x", padx=18, pady=(6, 8))
+        export = tk.Frame(card, bg="white")
+        export.pack(fill="x", padx=18, pady=(0, 8))
+        self.label(export, "导出到", width=7).pack(side="left")
+        self.export_entry = ttk.Entry(export, textvariable=self.export_path_text, state="readonly")
+        self.export_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.default_export_button = ttk.Button(export, text="恢复默认", command=lambda: self._set_export_parent(None), state="disabled")
+        self.default_export_button.pack(side="right")
+        self.choose_export_button = ttk.Button(export, text="选择位置", command=self._choose_export)
+        self.choose_export_button.pack(side="right", padx=(0, 8))
         controls = tk.Frame(card, bg="white")
         controls.pack(fill="x", padx=18, pady=(0, 12))
         self.label(controls, "压到每张").pack(side="left", padx=(0, 9))
@@ -225,6 +236,19 @@ class App(TkinterDnD.Tk):
         if chosen:
             self._set_sources(chosen)
 
+    def _set_export_parent(self, path):
+        self.export_parent = Path(path).expanduser() if path else None
+        self.export_path_text.set(str(self.export_parent) if self.export_parent else "默认：原文件夹旁边")
+        self.default_export_button.configure(state="normal" if self.export_parent else "disabled")
+
+    def _choose_export(self):
+        if self.busy:
+            return
+        chosen = filedialog.askdirectory(title="选择导出位置（将在其中新建结果文件夹）",
+                                         initialdir=str(self.export_parent or Path.home()), mustexist=True)
+        if chosen:
+            self._set_export_parent(chosen)
+
     def _drop(self, event):
         if self.busy:
             return "break"
@@ -249,7 +273,11 @@ class App(TkinterDnD.Tk):
         if not self.sources or any(not fs_path(path).exists() for path in self.sources):
             messagebox.showerror("文件不存在", "所选图片或文件夹已移动，请重新选择。", parent=self)
             return
+        if self.export_parent is not None and not fs_path(self.export_parent).is_dir():
+            messagebox.showerror("导出位置不可用", "所选导出文件夹不存在或已断开，请重新选择。", parent=self)
+            return
         selection = self.sources[0] if len(self.sources) == 1 else list(self.sources)
+        export_parent = self.export_parent
         try:
             mb = Decimal(self.target.get())
             if not mb.is_finite() or not Decimal("0.1") <= mb <= 20:
@@ -266,7 +294,9 @@ class App(TkinterDnD.Tk):
         self.last_scan = 0.0
         self.table.delete(*self.table.get_children())
         self.row_notes.clear()
-        for widget in (self.path_entry, self.choose_button, self.choose_images_button, self.target_input, self.start_button, self.open_button):
+        for widget in (self.path_entry, self.choose_button, self.choose_images_button, self.export_entry,
+                       self.choose_export_button, self.default_export_button, self.target_input,
+                       self.start_button, self.open_button):
             widget.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.state_text.set("正在扫描文件夹…")
@@ -276,7 +306,7 @@ class App(TkinterDnD.Tk):
         self.status_label.configure(fg=INK)
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
-        self.worker = threading.Thread(target=self._worker, args=(selection, target), name="image-compressor")
+        self.worker = threading.Thread(target=self._worker, args=(selection, target, export_parent), name="image-compressor")
         self.worker.start()
 
     def _emit(self, event):
@@ -287,9 +317,9 @@ class App(TkinterDnD.Tk):
             self.last_scan = now
         self.events.put(event)
 
-    def _worker(self, selection, target):
+    def _worker(self, selection, target, export_parent):
         try:
-            result = run_batch(selection, target, self.cancel_event, self._emit)
+            result = run_batch(selection, target, self.cancel_event, self._emit, output_parent=export_parent)
             self.events.put({"type": "done", "result": result})
         except Cancelled:
             self.events.put({"type": "cancelled"})
@@ -340,8 +370,10 @@ class App(TkinterDnD.Tk):
         self.progress.stop()
         self.progress.configure(mode="determinate")
         self.path_entry.configure(state="readonly")
-        for widget in (self.choose_button, self.choose_images_button, self.target_input):
+        self.export_entry.configure(state="readonly")
+        for widget in (self.choose_button, self.choose_images_button, self.choose_export_button, self.target_input):
             widget.configure(state="normal")
+        self.default_export_button.configure(state="normal" if self.export_parent else "disabled")
         self._path_changed()
         self.cancel_button.configure(state="disabled", text="取消")
         if self.output_folder:
@@ -422,11 +454,12 @@ def main():
     parser.add_argument("folder", nargs="?", default="")
     parser.add_argument("--batch", help="命令行批处理一个文件夹")
     parser.add_argument("--target-mb", type=Decimal, default=Decimal("1"))
+    parser.add_argument("--output-dir", type=Path, help="在指定文件夹中创建结果副本")
     parser.add_argument("--result-json", type=Path)
     args = parser.parse_args()
     if args.batch:
         try:
-            result = run_batch(args.batch, int(args.target_mb * 1_000_000))
+            result = run_batch(args.batch, int(args.target_mb * 1_000_000), output_parent=args.output_dir)
             data = asdict(result)
             data["output"] = str(result.output)
             data["report"] = str(result.report)
