@@ -25,6 +25,7 @@ def close_after_worker(app):
             time.sleep(0.03)
     if app.worker:
         app.worker.join(timeout=2)
+        assert not app.worker.is_alive()
     app.destroy()
 
 
