@@ -1,0 +1,35 @@
+name: 构建并验证 Mac 应用
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: 确认构建架构
+        run: test "$(uname -m)" = "${{ matrix.architecture }}"
+      - name: 安装固定版本依赖
+        run: python -m pip install -r requirements-build.txt
+      - name: 构建、签名并打包
+        run: bash build-macos.sh
+      - name: 验证 Mac 应用内的压缩和 GUI 启动
+        run: python mac_smoke.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 轻图图片压缩-macOS-${{ matrix.architecture }}
+          path: dist-macos/轻图图片压缩-macOS-${{ matrix.architecture }}.zip
+          if-no-files-found: error
+          retention-days: 30

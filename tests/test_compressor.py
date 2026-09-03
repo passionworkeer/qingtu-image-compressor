@@ -1,0 +1,151 @@
+import hashlib
+import threading
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+from compressor import run_batch
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def picture(path, size=(100, 70), color="red", **save):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, color).save(path, **save)
+    return path
+
+
+def test_recurses_preserves_originals_and_copies_other_files(tmp_path):
+    source = tmp_path / "中文 资料"
+    img = picture(source / "客户 一" / "照片.JPG")
+    (source / "空文件夹").mkdir()
+    note = source / "说明.txt"
+    note.write_text("原样保留", encoding="utf-8")
+    before = {p.relative_to(source): digest(p) for p in source.rglob("*") if p.is_file()}
+    result = run_batch(source)
+    assert result.output.parent == source.parent
+    assert result.output != source
+    assert (result.output / "空文件夹").is_dir()
+    assert result.cancelled is False
+    assert result.errors == 0
+    for rel, sha in before.items():
+        assert digest(source / rel) == sha
+        assert digest(result.output / rel) == sha
+    assert result.report.is_file()
+    again = run_batch(source)
+    assert again.output != result.output
+
+
+def test_large_20mb_image_meets_limit_and_remains_readable(tmp_path):
+    source = tmp_path / "大图"
+    source.mkdir()
+    image_path = source / "大照片.bmp"
+    noise = Image.effect_noise((3000, 2600), 80).convert("RGB")
+    noise.save(image_path)
+    original_hash = digest(image_path)
+    assert image_path.stat().st_size > 20_000_000
+    result = run_batch(source)
+    compressed = result.output / "大照片.jpg"
+    assert 100_000 < compressed.stat().st_size <= 1_000_000
+    with Image.open(compressed) as im:
+        im.load()
+        assert im.width > 800
+        assert abs(im.width / im.height - 3000 / 2600) < 0.003
+    assert digest(image_path) == original_hash
+    assert result.compressed == 1
+
+
+def test_converted_filename_never_overwrites_a_source_file_or_directory(tmp_path):
+    source = tmp_path / "同名"
+    source.mkdir()
+    Image.effect_noise((700, 600), 90).convert("RGB").save(source / "a.bmp")
+    jpg = picture(source / "a.jpg")
+    (source / "a_压缩.jpg").mkdir()
+    result = run_batch(source, target_bytes=30_000)
+    assert digest(result.output / "a.jpg") == digest(jpg)
+    assert (result.output / "a_压缩.jpg").is_dir()
+    other = list(result.output.glob("a_压缩*.jpg"))
+    assert any(p.is_file() and p.stat().st_size <= 30_000 for p in other)
+
+
+def test_transparency_is_preserved(tmp_path):
+    source = tmp_path / "透明"
+    source.mkdir()
+    im = Image.effect_noise((900, 700), 70).convert("RGBA")
+    im.putalpha(120)
+    im.save(source / "透明.png")
+    result = run_batch(source, target_bytes=80_000)
+    output = result.output / "透明.png"
+    assert output.stat().st_size <= 80_000
+    with Image.open(output) as read:
+        assert read.mode == "RGBA"
+        assert read.getextrema()[3] == (120, 120)
+
+
+def test_exif_orientation_applied_before_metadata_removed(tmp_path):
+    source = tmp_path / "旋转"
+    source.mkdir()
+    im = Image.effect_noise((1000, 600), 70).convert("RGB")
+    exif = Image.Exif()
+    exif[274] = 6
+    im.save(source / "竖图.jpg", quality=98, exif=exif)
+    result = run_batch(source, target_bytes=80_000)
+    with Image.open(result.output / "竖图.jpg") as read:
+        assert read.height > read.width
+        assert read.getexif().get(274, 1) == 1
+
+
+def test_animation_and_multipage_preserved_with_explicit_warning(tmp_path):
+    source = tmp_path / "动态"
+    source.mkdir()
+    first = Image.effect_noise((600, 500), 70).convert("RGB")
+    second = Image.new("RGB", first.size, "blue")
+    for ext in ("gif", "tiff"):
+        first.save(source / ("多帧." + ext), save_all=True, append_images=[second])
+    result = run_batch(source, target_bytes=20_000)
+    assert result.preserved == 2
+    assert result.compressed == 0
+    for path in source.iterdir():
+        assert digest(result.output / path.name) == digest(path)
+        with Image.open(result.output / path.name) as read:
+            assert read.n_frames == 2
+    assert "多帧" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_corrupt_image_does_not_abort_other_files(tmp_path):
+    source = tmp_path / "坏图"
+    good = picture(source / "正常.jpg")
+    bad = source / "损坏.jpg"
+    bad.write_bytes(b"this is not an image" * 3000)
+    result = run_batch(source, target_bytes=20_000)
+    assert result.errors == 1
+    assert digest(result.output / good.name) == digest(good)
+    assert digest(result.output / bad.name) == digest(bad)
+    assert "异常" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_cancellation_leaves_report_and_no_temporary_file(tmp_path):
+    source = tmp_path / "取消"
+    for index in range(5):
+        picture(source / (str(index) + ".jpg"))
+    stop = threading.Event()
+
+    def update(event):
+        if event["type"] == "file":
+            stop.set()
+
+    result = run_batch(source, cancel=stop, emit=update)
+    assert result.cancelled
+    assert result.processed == 1
+    assert result.report.exists()
+    assert not list(result.output.rglob("*.part"))
+
+
+def test_invalid_source_does_not_create_output(tmp_path):
+    with pytest.raises(ValueError):
+        run_batch(tmp_path / "missing")
+    with pytest.raises(ValueError):
+        run_batch(tmp_path, target_bytes=0)

@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+.build/
+.build-macos/
+dist/
+dist-macos/
+*.spec
+*.pyc
+.DS_Store
