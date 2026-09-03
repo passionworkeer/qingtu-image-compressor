@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory() as folder:
     assert result["processed"] == result["total"] == 8 and result["errors"] == 0
     assert result["compressed"] == 5 and result["other"] == 3
     assert result["skipped"] == 0
-    assert Path(result["output"]).parent == export_parent
+    assert Path(result["output"]).parent == export_parent.resolve()
     for path in non_images:
         assert not (Path(result["output"]) / path.relative_to(source)).exists()
         assert path.read_bytes() == b"not an image" * 1000
