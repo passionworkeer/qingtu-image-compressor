@@ -28,6 +28,15 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp",
 UNSUPPORTED_IMAGES = {".raw", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf",
                       ".rw2", ".psd", ".svg", ".ico", ".jxl", ".jp2", ".eps"}
 SUPPORTED_FORMATS = {"JPEG", "PNG", "WEBP", "BMP", "DIB", "TIFF", "GIF", "HEIF", "AVIF"}
+SYSTEM_DIRECTORIES = {
+    ".spotlight-v100", ".trashes", ".fseventsd", ".temporaryitems",
+    ".documentrevisions-v100", "$recycle.bin", "system volume information",
+    "lost+found",
+}
+SYSTEM_FILES = {
+    ".ds_store", "thumbs.db", "desktop.ini", ".metadata_never_index",
+    ".com.apple.timemachine.donotpresent", "icon\r",
+}
 VALID_SUFFIXES = {
     "JPEG": {".jpg", ".jpeg", ".jpe", ".jfif"}, "PNG": {".png"},
     "WEBP": {".webp"}, "BMP": {".bmp"}, "DIB": {".dib"},
@@ -38,8 +47,14 @@ CANONICAL_SUFFIX = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "BMP": ".bmp
                     "DIB": ".dib", "TIFF": ".tif", "GIF": ".gif", "HEIF": ".heic",
                     "AVIF": ".avif"}
 FATAL_IO = {errno.ENOSPC, getattr(errno, "EDQUOT", 122), errno.EROFS}
+DEVICE_IO = {
+    errno.EIO, getattr(errno, "ENODEV", 19), getattr(errno, "ENXIO", 6),
+    getattr(errno, "ESTALE", 116),
+}
+DEVICE_WINERRORS = {21, 1005, 1117, 1167}  # Not ready, bad volume, I/O device, disconnected.
 MIN_QUALITY = 82
 MAX_QUALITY = 95
+MAX_IMAGE_PIXELS = 120_000_000
 
 
 class Cancelled(Exception):
@@ -68,6 +83,10 @@ class BatchResult:
 def check_cancel(cancel: threading.Event) -> None:
     if cancel.is_set():
         raise Cancelled()
+
+
+def is_device_io_failure(exc: BaseException) -> bool:
+    return getattr(exc, "errno", None) in DEVICE_IO or getattr(exc, "winerror", None) in DEVICE_WINERRORS
 
 
 def fs_path(path: Path) -> Path:
@@ -116,12 +135,18 @@ def scan_folder(source: Path, cancel: threading.Event, emit: Callable):
                 entries = sorted(iterator, key=lambda e: e.name.casefold())
             reserved[relative] = {name_key(e.name) for e in entries}
         except OSError as exc:
+            if is_device_io_failure(exc):
+                raise OSError(getattr(exc, "errno", errno.EIO),
+                              f"源盘已断开或无法读取：{folder}") from exc
             items.append((relative, "error", str(exc)))
             continue
         for entry in entries:
             check_cancel(cancel)
             rel = relative / entry.name
             try:
+                if name_key(entry.name) in SYSTEM_DIRECTORIES and entry.is_dir(follow_symlinks=False):
+                    items.append((rel, "system", "系统索引或回收站目录，不读取其中内容"))
+                    continue
                 info = entry.stat(follow_symlinks=False)
                 if is_link_like(entry, info):
                     items.append((rel, "skip", "链接或联接点未跟随，请单独选择实际文件夹"))
@@ -133,6 +158,9 @@ def scan_folder(source: Path, cancel: threading.Event, emit: Callable):
                 else:
                     items.append((rel, "skip", "不是普通文件"))
             except OSError as exc:
+                if is_device_io_failure(exc):
+                    raise OSError(getattr(exc, "errno", errno.EIO),
+                                  f"源盘已断开或无法读取：{source / rel}") from exc
                 items.append((rel, "error", str(exc)))
         emit({"type": "scan", "found": len(items)})
     return folders, items, reserved
@@ -246,26 +274,67 @@ def write_file(destination: Path, cancel: threading.Event, *, data: bytes | None
             temporary.unlink(missing_ok=True)
 
 
-def prepare_image(opened: Image.Image) -> tuple[Image.Image, bytes | None]:
+def source_identity(info) -> tuple[int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size,
+            getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000)),
+            getattr(info, "st_ctime_ns", int(info.st_ctime * 1_000_000_000)))
+
+
+def write_verified(destination: Path, source: Path, initial_info, cancel: threading.Event,
+                   *, data: bytes | None = None) -> None:
+    """Publish output only when the source stayed unchanged throughout processing."""
+    write_file(destination, cancel, data=data, source=source)
+    try:
+        current = fs_path(source).stat()
+        if source_identity(current) != source_identity(initial_info):
+            raise OSError(errno.EAGAIN, "源文件在处理期间发生变化，请等待复制完成后重试")
+    except Exception:
+        fs_path(destination).unlink(missing_ok=True)
+        raise
+
+
+def prepare_image(opened: Image.Image) -> tuple[Image.Image, bytes | None, str]:
     im = ImageOps.exif_transpose(opened)
     has_alpha = "A" in im.getbands() or "transparency" in im.info
     mode = "RGBA" if has_alpha else "RGB"
     profile = im.info.get("icc_profile")
+    metadata_note = ""
     if profile:
-        srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
-        if im.mode == "RGB" and has_alpha:
-            im = im.convert("RGBA")  # Materialize PNG tRNS before LittleCMS transforms RGB.
-        # CMYK and LAB must be converted with their source profile before RGB conversion.
-        if im.mode not in ("RGB", "RGBA", "CMYK", "LAB"):
+        try:
+            srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+            if im.mode == "RGB" and has_alpha:
+                im = im.convert("RGBA")  # Materialize PNG tRNS before LittleCMS transforms RGB.
+            # CMYK and LAB must be converted with their source profile before RGB conversion.
+            if im.mode not in ("RGB", "RGBA", "CMYK", "LAB"):
+                im = im.convert(mode)
+            im = ImageCms.profileToProfile(im, ImageCms.ImageCmsProfile(io.BytesIO(profile)),
+                                          srgb, outputMode=mode)
+            profile = srgb.tobytes()
+        except (OSError, ValueError, ImageCms.PyCMSError):
             im = im.convert(mode)
-        im = ImageCms.profileToProfile(im, ImageCms.ImageCmsProfile(io.BytesIO(profile)),
-                                      srgb, outputMode=mode)
-        profile = srgb.tobytes()
+            profile = None
+            metadata_note = "无效 ICC 色彩配置已移除"
     else:
         im = im.convert(mode)
     # Avoid accidentally carrying EXIF, thumbnails, or PNG text into each trial encode.
     im.info.clear()
-    return im, profile
+    return im, profile, metadata_note
+
+
+def valid_icc_profile(profile: bytes | None) -> bool:
+    if not profile:
+        return True
+    try:
+        ImageCms.ImageCmsProfile(io.BytesIO(profile))
+        return True
+    except (OSError, ValueError, ImageCms.PyCMSError):
+        return False
+
+
+def check_pixel_limit(image: Image.Image) -> None:
+    pixels = image.width * image.height
+    if pixels > MAX_IMAGE_PIXELS:
+        raise ValueError(f"图片像素总数 {pixels:,} 超过安全上限 {MAX_IMAGE_PIXELS:,}")
 
 
 def png_colour_info(info) -> PngImagePlugin.PngInfo:
@@ -371,29 +440,41 @@ def fit_image(im: Image.Image, fmt: str, profile: bytes | None, target: int,
 def process_file(source: Path, destination: Path, target: int, occupied: set[str],
                  cancel: threading.Event):
     source = fs_path(source)
-    before = source.stat().st_size
+    link_info = source.lstat()
+    if is_link_like(source, link_info):
+        raise ValueError("文件在扫描后变成了链接，已拒绝读取")
+    initial_info = source.stat()
+    before = initial_info.st_size
     if is_appledouble_file(source):
         return None, "macOS 元数据已跳过", "外接盘的 AppleDouble 元数据，不是真实图片", before, 0
+    if name_key(source.name) in SYSTEM_FILES:
+        return None, "系统文件已跳过", "操作系统生成的辅助文件，不复制到结果文件夹", before, 0
     ext = source.suffix.lower()
     with warnings.catch_warnings():
-        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
         try:
             opened_context = Image.open(source)
         except UnidentifiedImageError:
             if ext in IMAGE_EXTENSIONS:
                 raise
-            if ext not in UNSUPPORTED_IMAGES:
-                return None, "非图片已跳过", "非图片，不复制到结果文件夹", before, 0
-            write_file(destination, cancel, source=source)
-            return destination, "保留未压缩", "暂不支持此图片格式", before, before
+            if ext in UNSUPPORTED_IMAGES:
+                return None, "不支持已跳过", "解码器无法确认是有效图片，未复制到结果文件夹", before, 0
+            return None, "非图片已跳过", "非图片，不复制到结果文件夹", before, 0
         with opened_context as opened:
+            check_pixel_limit(opened)
             original_format = opened.format or ""
             if original_format not in SUPPORTED_FORMATS:
-                write_file(destination, cancel, source=source)
+                opened.load()
+                write_verified(destination, source, initial_info, cancel)
                 return destination, "保留未压缩", f"暂不支持 {original_format or '此'} 图片格式", before, before
             frames = getattr(opened, "n_frames", 1)
             if frames > 1:
-                write_file(destination, cancel, source=source)
+                for frame in range(frames):
+                    check_cancel(cancel)
+                    opened.seek(frame)
+                    check_pixel_limit(opened)
+                    opened.load()
+                write_verified(destination, source, initial_info, cancel)
                 note = f"多帧/多页图片（{frames} 帧），保留全部内容"
                 if before > target:
                     note += "；超过目标大小"
@@ -403,31 +484,39 @@ def process_file(source: Path, destination: Path, target: int, occupied: set[str
                 if ext not in VALID_SUFFIXES[original_format]:
                     corrected = reserve_name(destination.stem + CANONICAL_SUFFIX[original_format], occupied)
                     destination = destination.with_name(corrected)
-                write_file(destination, cancel, source=source)
+                write_verified(destination, source, initial_info, cancel)
                 note = "小于或等于目标，原样复制"
                 if ext not in VALID_SUFFIXES[original_format]:
                     note += f"；扩展名修正为 {CANONICAL_SUFFIX[original_format]}"
                 return destination, "已达标", note, before, before
             check_cancel(cancel)
             if high_bit_depth(opened, source):
-                write_file(destination, cancel, source=source)
+                write_verified(destination, source, initial_info, cancel)
                 return destination, "保留未压缩", "高位深图片保留原件，避免降至 8 位导致色阶损失；超过目标大小", before, before
+            metadata_note = ""
             pnginfo = png_colour_info(opened.info) if original_format == "PNG" else None
             if original_format == "PNG":
                 # Preserve palette, transparency and colour metadata before considering resize.
                 with ImageOps.exif_transpose(opened) as native:
                     keep = {key: value for key, value in native.info.items()
                             if key in {"transparency", "icc_profile"}}
+                    if not valid_icc_profile(keep.get("icc_profile")):
+                        keep.pop("icc_profile", None)
+                        metadata_note = "无效 ICC 色彩配置已移除"
                     native.info.clear()
                     native.info.update(keep)
                     lossless = encode_image(native, "PNG", MAX_QUALITY, keep.get("icc_profile"), pnginfo)
                 if len(lossless) <= target:
                     if ext != ".png":
                         destination = destination.with_name(reserve_name(destination.stem + ".png", occupied))
-                    write_file(destination, cancel, data=lossless, source=source)
-                    return destination, "已压缩", f"{opened.width}×{opened.height}；原尺寸无损优化（方向已校正）", before, len(lossless)
+                    write_verified(destination, source, initial_info, cancel, data=lossless)
+                    note = f"{opened.width}×{opened.height}；原尺寸无损优化（方向已校正）"
+                    if metadata_note:
+                        note += f"；{metadata_note}"
+                    return destination, "已压缩", note, before, len(lossless)
                 del lossless
-            im, profile = prepare_image(opened)
+            im, profile, prepared_note = prepare_image(opened)
+            metadata_note = prepared_note or metadata_note
             if profile:
                 pnginfo = None  # Pixels/profile were converted to sRGB together.
     try:
@@ -449,7 +538,7 @@ def process_file(source: Path, destination: Path, target: int, occupied: set[str
         if not same_format:
             name = reserve_name(destination.stem + suffix, occupied)
             destination = destination.with_name(name)
-        write_file(destination, cancel, data=data, source=source)
+        write_verified(destination, source, initial_info, cancel, data=data)
         note = f"{original_size[0]}×{original_size[1]} → {size[0]}×{size[1]}"
         if fmt == "JPEG":
             note += f"；质量 {MIN_QUALITY}–{MAX_QUALITY}，4:4:4 色彩采样"
@@ -457,6 +546,8 @@ def process_file(source: Path, destination: Path, target: int, occupied: set[str
             note += f"；先尝试无损，必要时质量 {MIN_QUALITY}–{MAX_QUALITY}"
         if not same_format:
             note += f"；转为 {fmt}"
+        if metadata_note:
+            note += f"；{metadata_note}"
         return destination, "已压缩", note, before, len(data)
     finally:
         im.close()
@@ -515,6 +606,8 @@ def run_batch(source, target_bytes: int = 1_000_000,
         if is_link_like(fs_path(destination_parent), info) or not fs_path(destination_parent).is_dir():
             raise ValueError("导出位置必须是可访问的实际文件夹")
         destination_parent = destination_parent.resolve()
+        if selected is None and (destination_parent == root or destination_parent.is_relative_to(root)):
+            raise ValueError("导出位置不能位于源文件夹内部，请选择本机上的其他文件夹")
     else:
         destination_parent = root if selected is not None else root.parent
     cancel = cancel if cancel is not None else threading.Event()
@@ -553,10 +646,13 @@ def run_batch(source, target_bytes: int = 1_000_000,
                 src, dst = root / relative, output / relative
                 before = after = 0
                 if kind != "file":
-                    status = "跳过" if kind == "skip" else "异常"
+                    status = "系统目录已跳过" if kind == "system" else "跳过" if kind == "skip" else "异常"
                     note = detail
-                    result.skipped += kind == "skip"
-                    result.errors += kind == "error"
+                    if kind == "system":
+                        result.other += 1
+                    else:
+                        result.skipped += kind == "skip"
+                        result.errors += kind == "error"
                     shown_dst = ""
                 else:
                     try:
@@ -570,6 +666,8 @@ def run_batch(source, target_bytes: int = 1_000_000,
                             result.unchanged += 1
                         elif status == "保留未压缩":
                             result.preserved += 1
+                        elif status == "不支持已跳过":
+                            result.skipped += 1
                         else:
                             result.other += 1
                     except Cancelled:
@@ -577,19 +675,11 @@ def run_batch(source, target_bytes: int = 1_000_000,
                     except Exception as exc:
                         result.errors += 1
                         status, shown_dst = "异常", ""
-                        note = f"{type(exc).__name__}: {exc}"
-                        try:
-                            write_file(output / relative, cancel, source=src)
-                            after = before
-                            shown_dst = str(relative)
-                            note += "；已复制原件（可能未达标）"
-                        except Cancelled:
-                            raise
-                        except Exception as copy_exc:
-                            note += f"；原件复制失败：{copy_exc}"
-                            error_code = getattr(copy_exc, "errno", None) or getattr(exc, "errno", None)
-                            if error_code in FATAL_IO:
-                                result.fatal_error = f"写入失败，任务已停止：{copy_exc}"
+                        note = f"{type(exc).__name__}: {exc}；异常文件已跳过，未复制到结果文件夹"
+                        if getattr(exc, "errno", None) in FATAL_IO:
+                            result.fatal_error = f"写入失败，任务已停止：{exc}"
+                        elif is_device_io_failure(exc):
+                            result.fatal_error = f"存储设备已断开或读写失败，任务已停止：{exc}"
                 result.processed += 1
                 result.input_bytes += before
                 result.output_bytes += after

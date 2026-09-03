@@ -75,6 +75,192 @@ def test_custom_output_parent_must_be_an_existing_directory(tmp_path):
         run_batch(source, output_parent=file_target)
 
 
+@pytest.mark.parametrize("relative", [Path("."), Path("导出"), Path("导出") / "更深"])
+def test_folder_output_parent_cannot_be_inside_source(tmp_path, relative):
+    source = tmp_path / "整场拍摄"
+    image(source / "机位1" / "成片.jpg")
+    destination = source / relative
+    destination.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError, match="源文件夹内部"):
+        run_batch(source, output_parent=destination)
+
+    assert not list(destination.glob("整场拍摄_已压缩*"))
+
+
+def test_known_external_drive_system_folders_are_not_descended(tmp_path, monkeypatch):
+    source = tmp_path / "外接硬盘"
+    image(source / "客户照片" / "成片.jpg")
+    system_folder = source / ".Spotlight-V100"
+    image(system_folder / "索引伪装.jpg")
+    original_scandir = compressor.os.scandir
+
+    def fail_if_system_folder(path):
+        if Path(path).name == ".Spotlight-V100":
+            raise AssertionError("系统目录不应被读取")
+        return original_scandir(path)
+
+    monkeypatch.setattr(compressor.os, "scandir", fail_if_system_folder)
+    result = run_batch(source)
+
+    assert result.errors == result.skipped == 0
+    assert result.unchanged == 1
+    assert result.other == 1
+    assert not (result.output / ".Spotlight-V100").exists()
+    assert "系统目录已跳过" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_known_operating_system_files_are_ignored_without_decoding(tmp_path, monkeypatch):
+    source = tmp_path / "相机素材"
+    image(source / "成片.jpg")
+    metadata = source / ".DS_Store"
+    metadata.write_bytes(b"not an image")
+    original_open = compressor.Image.open
+
+    def reject_metadata(path, *args, **kwargs):
+        if Path(path).name == ".DS_Store":
+            raise AssertionError("系统文件不应交给图片解码器")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(compressor.Image, "open", reject_metadata)
+    result = run_batch(source)
+
+    assert result.errors == result.skipped == 0
+    assert result.unchanged == result.other == 1
+    assert not (result.output / metadata.name).exists()
+    assert "系统文件已跳过" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_decompression_bomb_is_reported_and_not_copied(tmp_path, monkeypatch):
+    source = tmp_path / "异常像素"
+    safe = source / "正常.jpg"
+    safe.parent.mkdir(parents=True)
+    Image.new("RGB", (20, 20), "green").save(safe)
+    bomb = source / "超大像素.jpg"
+    Image.new("RGB", (42, 38), "red").save(bomb)
+    monkeypatch.setattr(compressor, "MAX_IMAGE_PIXELS", 700)
+
+    result = run_batch(source)
+
+    assert result.errors == 1 and result.unchanged == 1
+    assert (result.output / safe.name).exists()
+    assert not (result.output / bomb.name).exists()
+    report = result.report.read_text(encoding="utf-8-sig")
+    assert "超过安全上限" in report
+    assert "异常文件已跳过" in report
+
+
+def test_later_multipage_frame_also_obeys_pixel_limit(tmp_path, monkeypatch):
+    source = tmp_path / "多页像素上限"
+    source.mkdir()
+    photo = source / "第二页过大.tiff"
+    first = Image.new("RGB", (20, 20), "green")
+    second = Image.new("RGB", (42, 38), "red")
+    first.save(photo, save_all=True, append_images=[second])
+    monkeypatch.setattr(compressor, "MAX_IMAGE_PIXELS", 700)
+
+    result = run_batch(source)
+
+    assert result.errors == 1 and result.preserved == 0
+    assert not (result.output / photo.name).exists()
+    assert "超过安全上限" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_truncated_image_is_not_left_in_results(tmp_path):
+    source = tmp_path / "截断文件"
+    image(source / "正常.jpg")
+    broken = source / "传输中断.jpg"
+    Image.effect_noise((800, 600), 70).convert("RGB").save(broken, quality=95)
+    broken.write_bytes(broken.read_bytes()[:1000])
+
+    result = run_batch(source)
+
+    assert result.errors == 1 and result.unchanged == 1
+    assert not (result.output / broken.name).exists()
+    assert "异常文件已跳过" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_truncated_later_animation_frame_is_not_preserved(tmp_path):
+    source = tmp_path / "损坏动图"
+    source.mkdir()
+    first = Image.effect_noise((600, 500), 70).convert("RGB")
+    second = Image.new("RGB", first.size, "blue")
+    broken = source / "第二帧不完整.gif"
+    first.save(broken, save_all=True, append_images=[second])
+    broken.write_bytes(broken.read_bytes()[:-20])
+
+    with Image.open(broken) as opened:
+        assert opened.n_frames == 2
+        with pytest.raises(OSError, match="truncated"):
+            opened.seek(1)
+            opened.load()
+
+    result = run_batch(source)
+
+    assert result.errors == 1 and result.preserved == 0
+    assert not (result.output / broken.name).exists()
+    assert "异常文件已跳过" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_invalid_icc_metadata_does_not_discard_decodable_photo(tmp_path):
+    source = tmp_path / "坏元数据"
+    source.mkdir()
+    photo = source / "像素正常.jpg"
+    Image.effect_noise((1200, 900), 80).convert("RGB").save(
+        photo, quality=98, icc_profile=b"bad-profile")
+    assert photo.stat().st_size > 100_000
+
+    result = run_batch(source, target_bytes=100_000)
+
+    assert result.errors == 0 and result.compressed == 1
+    output = result.output / photo.name
+    assert output.stat().st_size <= 100_000
+    with Image.open(output) as opened:
+        opened.load()
+        assert "icc_profile" not in opened.info
+    assert "无效 ICC 色彩配置已移除" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_invalid_icc_is_removed_on_png_lossless_fast_path(tmp_path):
+    source = tmp_path / "PNG坏元数据"
+    source.mkdir()
+    photo = source / "像素正常.png"
+    Image.new("RGB", (1200, 900), "#2478a8").save(
+        photo, compress_level=0, icc_profile=b"not-an-icc")
+    assert photo.stat().st_size > 100_000
+
+    result = run_batch(source, target_bytes=100_000)
+
+    assert result.errors == 0 and result.compressed == 1
+    output = result.output / photo.name
+    assert output.stat().st_size <= 100_000
+    with Image.open(output) as opened:
+        opened.load()
+        assert "icc_profile" not in opened.info
+    assert "无效 ICC 色彩配置已移除" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_source_changed_after_validation_is_removed_from_results(tmp_path, monkeypatch):
+    source = tmp_path / "仍在传输"
+    photo = image(source / "尚未复制完成.jpg")
+    original_write = compressor.write_file
+    changed = False
+
+    def replace_source_before_copy(destination, cancel, *, data=None, source=None):
+        nonlocal changed
+        if source is not None and not changed:
+            changed = True
+            Path(source).write_bytes(b"new incomplete payload")
+        return original_write(destination, cancel, data=data, source=source)
+
+    monkeypatch.setattr(compressor, "write_file", replace_source_before_copy)
+    result = run_batch(source)
+
+    assert result.errors == 1 and result.unchanged == 0
+    assert not (result.output / photo.name).exists()
+    assert "源文件在处理期间发生变化" in result.report.read_text(encoding="utf-8-sig")
+
+
 def test_camera_batch_with_120_photos_and_appledouble_sidecars(tmp_path):
     source = tmp_path / "外接盘" / "整场拍摄"
     export_parent = tmp_path / "本机导出"
@@ -160,6 +346,23 @@ def test_disk_full_stops_batch_with_incomplete_status(tmp_path, monkeypatch):
     assert result.processed < result.total
     assert result.errors >= 1
     assert "未完整" in result.report.read_text(encoding="utf-8-sig")
+
+
+def test_external_drive_disconnect_stops_after_first_io_error(tmp_path, monkeypatch):
+    source = tmp_path / "已断开的外接盘"
+    for index in range(8):
+        image(source / f"{index}.jpg")
+
+    def disconnected(*args, **kwargs):
+        raise OSError(errno.EIO, "external disk disconnected")
+
+    monkeypatch.setattr(compressor, "process_file", disconnected)
+    result = run_batch(source)
+
+    assert result.total == 8
+    assert result.processed == result.errors == 1
+    assert result.fatal_error.startswith("存储设备已断开或读写失败")
+    assert "副本未完整" in result.report.read_text(encoding="utf-8-sig")
 
 
 def test_output_destination_existing_file_is_never_overwritten(tmp_path):

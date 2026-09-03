@@ -78,3 +78,27 @@ def test_direct_junction_is_rejected_before_resolve(tmp_path):
         assert not (tmp_path / "actual_已压缩").exists()
     finally:
         os.rmdir(junction)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX scan-to-open symlink regression")
+def test_file_replaced_by_symlink_after_scan_is_not_followed(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside.jpg"
+    Image.new("RGB", (10, 10), "red").save(outside)
+    selected = source / "selected.jpg"
+    Image.new("RGB", (10, 10), "blue").save(selected)
+    original_scan = compressor.scan_folder
+
+    def replace_after_scan(*args, **kwargs):
+        result = original_scan(*args, **kwargs)
+        selected.unlink()
+        selected.symlink_to(outside)
+        return result
+
+    monkeypatch.setattr(compressor, "scan_folder", replace_after_scan)
+    result = compressor.run_batch(source)
+
+    assert result.errors == 1 and result.unchanged == 0
+    assert not (result.output / selected.name).exists()
+    assert "扫描后变成了链接" in result.report.read_text(encoding="utf-8-sig")

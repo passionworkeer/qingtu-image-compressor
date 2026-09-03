@@ -71,17 +71,23 @@ def test_nested_non_images_are_not_written_or_counted_as_savings(tmp_path):
     assert all(digest(path) == sha for path, sha in before.items())
 
 
-def test_unsupported_image_is_still_preserved_but_document_is_skipped(tmp_path):
+def test_unidentified_unsupported_suffix_and_document_are_not_copied(tmp_path):
     source = tmp_path / "原始素材"
     source.mkdir()
     raw = source / "相机.CR3"
     raw.write_bytes(b"unsupported raw placeholder")
+    fake_svg = source / "伪装.svg"
+    fake_svg.write_text("<html>not an image</html>", encoding="utf-8")
+    fake_psd = source / "伪装.psd"
+    fake_psd.write_bytes(b"arbitrary bytes")
     note = source / "备注.txt"
     note.write_text("不复制", encoding="utf-8")
     result = run_batch(source)
-    assert result.preserved == result.other == 1
-    assert digest(result.output / raw.name) == digest(raw)
-    assert not (result.output / note.name).exists()
+    assert result.skipped == 3
+    assert result.other == 1
+    assert result.preserved == result.errors == 0
+    assert all(not (result.output / path.name).exists() for path in (raw, fake_svg, fake_psd, note))
+    assert "无法确认是有效图片" in result.report.read_text(encoding="utf-8-sig")
 
 
 def test_large_20mb_image_meets_limit_and_remains_readable(tmp_path):
@@ -168,8 +174,10 @@ def test_corrupt_image_does_not_abort_other_files(tmp_path):
     result = run_batch(source, target_bytes=20_000)
     assert result.errors == 1
     assert digest(result.output / good.name) == digest(good)
-    assert digest(result.output / bad.name) == digest(bad)
-    assert "异常" in result.report.read_text(encoding="utf-8-sig")
+    assert not (result.output / bad.name).exists()
+    report = result.report.read_text(encoding="utf-8-sig")
+    assert "异常文件已跳过" in report
+    assert "未复制到结果文件夹" in report
 
 
 def test_cancellation_leaves_report_and_no_temporary_file(tmp_path):
