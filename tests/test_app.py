@@ -5,6 +5,29 @@ from PIL import Image
 from app import App
 
 
+def wait_until_finished(app, timeout=60):
+    end = time.monotonic() + timeout
+    while app.busy and time.monotonic() < end:
+        app.update()
+        time.sleep(0.03)
+    assert not app.busy
+    if app.worker:
+        app.worker.join(timeout=2)
+        assert not app.worker.is_alive()
+
+
+def close_after_worker(app):
+    if app.busy:
+        app.cancel_event.set()
+        end = time.monotonic() + 60
+        while app.busy and time.monotonic() < end:
+            app.update()
+            time.sleep(0.03)
+    if app.worker:
+        app.worker.join(timeout=2)
+    app.destroy()
+
+
 def test_gui_drop_process_and_result_folder_button(tmp_path):
     source = tmp_path / "拖入 空格 {花括号}"
     source.mkdir()
@@ -17,6 +40,7 @@ def test_gui_drop_process_and_result_folder_button(tmp_path):
             app.update()
             assert app.open_button.winfo_ismapped()
             assert app.open_button.winfo_rooty() + app.open_button.winfo_height() <= app.winfo_rooty() + app.winfo_height()
+            assert app.table.winfo_height() >= 64
         assert str(app.start_button.cget("state")) == "disabled"
         # Generate the same Tcl list shape as an Explorer folder-drop event.
         drop_data = app.tk.call("format", "%s", app.tk.call("list", str(source)))
@@ -26,18 +50,14 @@ def test_gui_drop_process_and_result_folder_button(tmp_path):
         app.start_button.invoke()
         assert app.busy
         assert str(app.start_button.cget("state")) == "disabled"
-        end = time.monotonic() + 15
-        while app.busy and time.monotonic() < end:
-            app.update()
-            time.sleep(0.03)
-        assert not app.busy
+        wait_until_finished(app)
         assert app.result is not None
         assert app.result.errors == 0
         assert app.state_text.get() == "处理完成"
         assert str(app.open_button.cget("state")) == "normal"
         assert (app.result.output / "小图.jpg").exists()
     finally:
-        app.destroy()
+        close_after_worker(app)
 
 
 def test_gui_rejects_files_from_different_folders(monkeypatch, tmp_path):
@@ -55,7 +75,7 @@ def test_gui_rejects_files_from_different_folders(monkeypatch, tmp_path):
         assert not app.sources
         assert messages
     finally:
-        app.destroy()
+        close_after_worker(app)
 
 
 def test_gui_accepts_single_image_drop(tmp_path):
@@ -68,11 +88,8 @@ def test_gui_accepts_single_image_drop(tmp_path):
         assert app._drop(event) == "copy"
         assert app.sources == [source]
         app.start_button.invoke()
-        end = time.monotonic() + 15
-        while app.busy and time.monotonic() < end:
-            app.update()
-            time.sleep(0.03)
+        wait_until_finished(app)
         assert app.result.errors == 0
         assert (app.result.output / source.name).exists()
     finally:
-        app.destroy()
+        close_after_worker(app)

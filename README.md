@@ -1,10 +1,10 @@
-# 轻图：批量图片压缩
+# 轻图：图片压缩
 
-Windows 本地桌面应用。将一个文件夹递归复制到同级的新文件夹，并把支持的静态图片压到目标体积；原图只读。默认 1 MB = 1,000,000 字节。
+Windows / macOS 本地桌面应用。可拖入单图、同一目录中的多张图片，或一个完整文件夹。文件夹会遍历所有子目录并保留目录结构；原图只读。默认 1 MB = 1,000,000 字节。
 
 ## 开发
 
-使用 Windows x64 与 Python 3.11（本次 3.11.9）。
+使用 Python 3.11。Windows 10/11 与 macOS 15（Apple 芯片及 Intel）分别构建。
 
 ```powershell
 python -m venv .venv
@@ -21,7 +21,20 @@ python -m venv .venv
 
 build.ps1 使用 UTF-8 BOM，兼容 Windows PowerShell 的中文脚本读取。生成 dist/图片压缩工具.exe，一个文件即可分发。
 
-界面测试会短暂打开 Tk 窗口，覆盖 Tcl 格式的文件夹拖入数据、开始按钮、后台处理与结果状态。核心测试使用真实生成的图片，覆盖 20 MB 大图、体积上限、中文和嵌套路径、原件哈希、透明度、旋转、ICC、GIF/多页保留、HEIC/AVIF/WebP/TIFF、同名冲突、坏图继续及取消。Windows Explorer 实际鼠标拖放仍建议在目标用户机器验收。
+Mac 必须在对应架构的 Mac 上构建，不能从 Windows 交叉打包：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-build.txt
+PYTHON_BIN=.venv/bin/python bash build-macos.sh
+python mac_smoke.py
+```
+
+GitHub Actions 工作流 `.github/workflows/build-macos.yml` 会在 `macos-15`（arm64）和 `macos-15-intel`（x86_64）分别执行全部测试、打包、ad-hoc codesign、命令行压缩烟测和 GUI 启动烟测。输出两个按 CPU 区分的 ZIP。
+
+当前没有 Apple Developer ID 证书，因此不是 Apple 公证包。从浏览器下载后，首次启动可能需要在 Finder 中右键应用并选“打开”；正式做到首次直接双击无 Gatekeeper 提示，需要提供 Apple Developer Program 的 Developer ID Application 证书并执行 notarization。
+
+界面测试会短暂打开 Tk 窗口，覆盖 Tcl 格式的文件夹/单图拖入、跨目录多图拒绝、开始按钮、后台处理、620–880 像素窗口高度和结果状态。核心测试覆盖 20 MB 大图、28 层目录 56 张图片、无后缀及错后缀图片、原件哈希、透明度、旋转、ICC、GIF/多页保留、HEIC/AVIF/WebP/TIFF、云盘 reparse、exFAT 发布回退、同名冲突、磁盘满停止、坏图继续及取消。
 
 命令行验收入口（窗口版 EXE 不输出控制台，请指定 JSON）：
 
@@ -29,7 +42,7 @@ build.ps1 使用 UTF-8 BOM，兼容 Windows PowerShell 的中文脚本读取。�
 Start-Process -FilePath '.\dist\图片压缩工具.exe' -ArgumentList '--batch "D:\图片" --target-mb 1 --result-json "D:\验收结果.json"' -Wait -WindowStyle Hidden
 ```
 
-退出码：0 全部正常完成；2 含保留未压缩/跳过/异常；1 致命错误。
+退出码：0 全部正常完成；2 含保留未压缩/跳过/异常或写入中止；1 启动级错误。
 
 ## 文件结构
 

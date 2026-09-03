@@ -71,6 +71,7 @@ class App(TkinterDnD.Tk):
         self.events = queue.Queue(maxsize=300)
         self.busy = False
         self.closing = False
+        self.worker = None
         self.result = None
         self.output_folder = None
         self.started = 0.0
@@ -114,18 +115,18 @@ class App(TkinterDnD.Tk):
 
     def _layout(self):
         container = tk.Frame(self, bg=BG)
-        container.pack(fill="both", expand=True, padx=30, pady=(24, 16))
+        container.pack(fill="both", expand=True, padx=30, pady=(16, 12))
         top = tk.Frame(container, bg=BG)
         top.pack(fill="x")
         self.label(top, "轻图", font=(self.font_family, 23, "bold")).pack(side="left")
         self.label(top, "图片压缩", font=(self.font_family, 12), fg=MUTED).pack(side="left", padx=12, pady=(9, 0))
         self.label(top, "100% 本地 · 原图保留", fg="#087A61", font=(self.font_family, 10)).pack(side="right", pady=(9, 0))
-        self.label(container, "拖进来，压到 1 MB 左右。单图和整文件夹都可以。", fg=MUTED).pack(fill="x", pady=(4, 14))
+        self.label(container, "拖进来，压到 1 MB 左右。单图和整文件夹都可以。", fg=MUTED).pack(fill="x", pady=(3, 8))
 
         card = tk.Frame(container, bg="white", highlightbackground="#E1E6EF", highlightthickness=1)
         card.pack(fill="x")
-        self.drop_area = tk.Canvas(card, height=122, bg="#F3F3FF", highlightthickness=0, cursor="hand2")
-        self.drop_area.pack(fill="x", padx=16, pady=(16, 10))
+        self.drop_area = tk.Canvas(card, height=88, bg="#F3F3FF", highlightthickness=0, cursor="hand2")
+        self.drop_area.pack(fill="x", padx=16, pady=(10, 8))
         self.drop_area.bind("<Configure>", self._draw_drop)
         self.drop_area.bind("<Button-1>", lambda _: self._choose_folder())
         row = tk.Frame(card, bg="white")
@@ -137,9 +138,9 @@ class App(TkinterDnD.Tk):
         self.choose_images_button = ttk.Button(row, text="选择图片", command=self._choose_images)
         self.choose_images_button.pack(side="right", padx=(0, 8))
         self.label(card, "选文件夹会下钻全部子目录；单图和同一目录中的多图也可一次处理。", fg=MUTED,
-                   font=(self.font_family, 9)).pack(fill="x", padx=18, pady=(7, 12))
+                   font=(self.font_family, 9)).pack(fill="x", padx=18, pady=(6, 8))
         controls = tk.Frame(card, bg="white")
-        controls.pack(fill="x", padx=18, pady=(0, 17))
+        controls.pack(fill="x", padx=18, pady=(0, 12))
         self.label(controls, "压到每张").pack(side="left", padx=(0, 9))
         self.target_input = ttk.Spinbox(controls, from_=0.1, to=20, increment=0.1,
                                         textvariable=self.target, width=5)
@@ -152,13 +153,13 @@ class App(TkinterDnD.Tk):
         self.cancel_button.pack(side="right", padx=(0, 9))
 
         status = tk.Frame(container, bg=BG)
-        status.pack(fill="x", pady=(19, 7))
+        status.pack(fill="x", pady=(12, 6))
         self.status_label = self.label(status, textvariable=self.state_text, font=(self.font_family, 12, "bold"))
         self.status_label.pack(side="left")
         self.label(status, textvariable=self.metrics, fg=MUTED, font=(self.font_family, 9)).pack(side="right")
         self.progress = ttk.Progressbar(container, mode="determinate", maximum=100)
         self.progress.pack(fill="x", ipady=2)
-        self.label(container, textvariable=self.detail_text, fg=MUTED, font=(self.font_family, 9)).pack(fill="x", pady=(7, 10))
+        self.label(container, textvariable=self.detail_text, fg=MUTED, font=(self.font_family, 9)).pack(fill="x", pady=(6, 7))
 
         table_frame = tk.Frame(container, bg="white", highlightbackground="#E1E6EF", highlightthickness=1)
         table_frame.pack(fill="both", expand=True)
@@ -177,26 +178,26 @@ class App(TkinterDnD.Tk):
         self.table.bind("<<TreeviewSelect>>", self._select_row)
         self.row_notes = {}
         footer = tk.Frame(container, bg=BG)
-        footer.pack(side="bottom", before=table_frame, fill="x", pady=(12, 0))
+        footer.pack(side="bottom", before=table_frame, fill="x", pady=(8, 0))
         self.output_label = self.label(footer, textvariable=self.output_text, fg=MUTED,
                                        font=(self.font_family, 9), wraplength=550, justify="left")
         self.output_label.pack(side="left", fill="x", expand=True)
         self.open_button = ttk.Button(footer, text="打开结果文件夹", state="disabled", command=self._open_output)
         self.open_button.pack(side="right")
         self.label(container, "支持 JPG / PNG / WebP / HEIC / AVIF / BMP / TIFF / GIF。动图、多页图保留原件并提示。",
-                   fg=MUTED, font=(self.font_family, 9)).pack(side="bottom", before=footer, fill="x", pady=(10, 0))
+                   fg=MUTED, font=(self.font_family, 9)).pack(side="bottom", before=footer, fill="x", pady=(6, 0))
 
     def _draw_drop(self, event=None):
         c = self.drop_area
         w = c.winfo_width()
         c.delete("all")
-        c.create_rectangle(1, 1, w - 2, 120, outline="#A9A7F3", dash=(7, 5))
+        c.create_rectangle(1, 1, w - 2, 86, outline="#A9A7F3", dash=(7, 5))
         cx = w / 2
-        c.create_rectangle(cx - 20, 12, cx + 20, 44, outline=BLUE, width=2)
-        c.create_oval(cx + 6, 18, cx + 11, 23, fill=BLUE, outline=BLUE)
-        c.create_line(cx - 15, 39, cx - 5, 28, cx + 3, 36, cx + 9, 30, cx + 16, 39, fill=BLUE, width=2)
-        c.create_text(cx, 68, text="把图片或文件夹拖到这里", fill=INK, font=(self.font_family, 17, "bold"))
-        c.create_text(cx, 99, text="文件夹会自动遍历所有子目录", fill=MUTED, font=(self.font_family, 10))
+        c.create_rectangle(cx - 17, 8, cx + 17, 34, outline=BLUE, width=2)
+        c.create_oval(cx + 5, 13, cx + 9, 17, fill=BLUE, outline=BLUE)
+        c.create_line(cx - 13, 30, cx - 4, 21, cx + 2, 27, cx + 8, 23, cx + 13, 30, fill=BLUE, width=2)
+        c.create_text(cx, 52, text="把图片或文件夹拖到这里", fill=INK, font=(self.font_family, 15, "bold"))
+        c.create_text(cx, 74, text="文件夹会自动遍历所有子目录", fill=MUTED, font=(self.font_family, 9))
 
     def _set_sources(self, paths):
         self.sources = [Path(path).expanduser() for path in paths]
@@ -275,7 +276,8 @@ class App(TkinterDnD.Tk):
         self.status_label.configure(fg=INK)
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
-        threading.Thread(target=self._worker, args=(selection, target), daemon=True).start()
+        self.worker = threading.Thread(target=self._worker, args=(selection, target), name="image-compressor")
+        self.worker.start()
 
     def _emit(self, event):
         if event["type"] == "scan":
