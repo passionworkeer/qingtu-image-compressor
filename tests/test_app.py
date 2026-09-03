@@ -12,7 +12,7 @@ def test_gui_drop_process_and_result_folder_button(tmp_path):
     app = App()
     try:
         app.update()
-        for height in (680, 720, 880):
+        for height in (620, 680, 720, 880):
             app.geometry(f"960x{height}")
             app.update()
             assert app.open_button.winfo_ismapped()
@@ -36,6 +36,24 @@ def test_gui_drop_process_and_result_folder_button(tmp_path):
         assert app.state_text.get() == "处理完成"
         assert str(app.open_button.cget("state")) == "normal"
         assert (app.result.output / "小图.jpg").exists()
+    finally:
+        app.destroy()
+
+
+def test_gui_rejects_files_from_different_folders(monkeypatch, tmp_path):
+    first = tmp_path / "a" / "1.jpg"
+    second = tmp_path / "b" / "2.jpg"
+    for path in (first, second):
+        path.parent.mkdir()
+        Image.new("RGB", (10, 10)).save(path)
+    messages = []
+    monkeypatch.setattr("app.messagebox.showinfo", lambda *args, **kwargs: messages.append(args))
+    app = App()
+    try:
+        event = SimpleNamespace(data=app.tk.call("list", str(first), str(second)), action="copy")
+        assert app._drop(event) == "break"
+        assert not app.sources
+        assert messages
     finally:
         app.destroy()
 

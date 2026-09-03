@@ -158,6 +158,36 @@ def reserve_name(name: str, occupied: set[str]) -> str:
     return candidate
 
 
+def publish_staged(temporary: Path, destination: Path, cancel: threading.Event,
+                   platform_name: str | None = None) -> None:
+    platform_name = os.name if platform_name is None else platform_name
+    if platform_name == "nt":
+        if destination.exists():
+            raise FileExistsError(f"输出文件已存在：{destination.name}")
+        os.rename(temporary, destination)
+        return
+    try:
+        os.link(temporary, destination)
+        temporary.unlink()
+    except OSError as link_error:
+        fallback_codes = {errno.EPERM, errno.EACCES, errno.EXDEV,
+                          getattr(errno, "EOPNOTSUPP", 95), getattr(errno, "ENOTSUP", 95)}
+        if link_error.errno not in fallback_codes:
+            raise
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        published = True
+        try:
+            with os.fdopen(descriptor, "wb") as final, temporary.open("rb") as staged:
+                while chunk := staged.read(1024 * 1024):
+                    check_cancel(cancel)
+                    final.write(chunk)
+            published = False
+            temporary.unlink()
+        finally:
+            if published:
+                destination.unlink(missing_ok=True)
+
+
 def write_file(destination: Path, cancel: threading.Event, *, data: bytes | None = None,
                source: Path | None = None) -> None:
     """Publish a complete file only. Windows rename refuses an existing target."""
@@ -176,15 +206,7 @@ def write_file(destination: Path, cancel: threading.Event, *, data: bytes | None
                         check_cancel(cancel)
                         out.write(chunk)
         check_cancel(cancel)
-        if os.name == "nt":
-            if destination.exists():
-                raise FileExistsError(f"输出文件已存在：{destination.name}")
-            os.rename(temporary, destination)
-        else:
-            # POSIX rename replaces an existing file. Hard-link publication is atomic and
-            # fails with EEXIST, preserving a concurrent writer's data.
-            os.link(temporary, destination)
-            temporary.unlink()
+        publish_staged(temporary, destination, cancel)
         temporary = None
         if source:
             try:
@@ -343,19 +365,23 @@ def csv_cell(value):
 
 def normalize_sources(source) -> tuple[Path, str, list[Path] | None]:
     if isinstance(source, (str, os.PathLike)):
-        path = Path(source).expanduser().resolve()
-        if path.is_symlink():
+        raw = Path(source).expanduser().absolute()
+        if raw.is_symlink():
             raise ValueError("不能直接处理链接，请选择其实际文件或文件夹")
+        path = raw.resolve()
         if path.is_dir():
             return path, path.name, None
         if path.is_file():
             return path.parent, path.stem, [path]
         raise ValueError("请选择存在的图片或文件夹")
     try:
-        paths = list(dict.fromkeys(Path(item).expanduser().resolve() for item in source))
+        raw_paths = [Path(item).expanduser().absolute() for item in source]
+        if any(path.is_symlink() for path in raw_paths):
+            raise ValueError("不能直接处理链接，请选择其实际文件或文件夹")
+        paths = list(dict.fromkeys(path.resolve() for path in raw_paths))
     except (TypeError, ValueError):
         raise ValueError("请选择图片或文件夹") from None
-    if not paths or any(not path.is_file() or path.is_symlink() for path in paths):
+    if not paths or any(not path.is_file() for path in paths):
         raise ValueError("一次可选择一个文件夹，或同一目录中的一张/多张图片")
     parents = {path.parent for path in paths}
     if len(parents) != 1:

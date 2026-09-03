@@ -100,6 +100,27 @@ def test_output_destination_existing_file_is_never_overwritten(tmp_path):
     assert not list(tmp_path.glob("*.part"))
 
 
+def test_posix_publish_falls_back_when_hard_links_are_unsupported(tmp_path, monkeypatch):
+    target = tmp_path / "result.jpg"
+    monkeypatch.setattr(compressor.os, "link", lambda *args: (_ for _ in ()).throw(OSError(errno.EPERM, "no links")))
+    staged = tmp_path / ".stage.part"
+    staged.write_bytes(b"complete")
+    compressor.publish_staged(staged, target, threading.Event(), platform_name="posix")
+    assert target.read_bytes() == b"complete"
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_direct_symlink_input_is_rejected_when_platform_supports_it(tmp_path):
+    source = image(tmp_path / "source.jpg")
+    link = tmp_path / "link.jpg"
+    try:
+        link.symlink_to(source)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    with pytest.raises(ValueError, match="链接"):
+        run_batch(link)
+
+
 def test_rejects_mixed_folder_and_file_input(tmp_path):
     folder = tmp_path / "目录"
     folder.mkdir()

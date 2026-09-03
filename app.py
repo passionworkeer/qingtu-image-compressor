@@ -42,7 +42,7 @@ class App(TkinterDnD.Tk):
         self.title("轻图 · 批量图片压缩")
         self.configure(bg=BG)
         self.geometry(f"920x{min(820, self.winfo_screenheight() - 80)}")
-        self.minsize(820, 680)
+        self.minsize(780, 620)
         icon = Path(__file__).with_name("app.ico")
         if icon.exists():
             try:
@@ -230,7 +230,8 @@ class App(TkinterDnD.Tk):
         paths = self.tk.splitlist(event.data)
         candidates = [Path(path) for path in paths]
         valid = (len(candidates) == 1 and candidates[0].is_dir()) or (
-            candidates and all(path.is_file() for path in candidates))
+            candidates and all(path.is_file() for path in candidates)
+            and len({path.parent.resolve() for path in candidates}) == 1)
         if not valid:
             messagebox.showinfo("请选择图片或文件夹", "可拖入一个文件夹，或同一目录中的一张/多张图片。", parent=self)
             return "break"
@@ -367,10 +368,10 @@ class App(TkinterDnD.Tk):
                 self.state_text.set("处理结束 · 文件夹中没有文件")
             else:
                 self.state_text.set("处理完成")
-            self.status_label.configure(fg="#B45309" if caution or r.cancelled or r.fatal_error else "#087A61")
+            self.status_label.configure(fg="#B42318" if r.fatal_error else "#B45309" if caution or r.cancelled else "#087A61")
             self.detail_text.set(r.fatal_error or f"压缩 {r.compressed} · 已达标 {r.unchanged} · 其他文件 {r.other} · 保留未压缩 {r.preserved} · 异常 {r.errors} · 跳过 {r.skipped}。完整明细见 CSV 报告。")
             self.output_text.set("结果位置：" + str(r.output))
-            if not r.cancelled:
+            if not r.cancelled and not r.fatal_error:
                 self.progress.configure(value=max(r.total, 1))
 
     def _select_row(self, _):
