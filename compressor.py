@@ -369,10 +369,10 @@ def process_file(source: Path, destination: Path, target: int, occupied: set[str
         except UnidentifiedImageError:
             if ext in IMAGE_EXTENSIONS:
                 raise
+            if ext not in UNSUPPORTED_IMAGES:
+                return None, "非图片已跳过", "非图片，不复制到结果文件夹", before, 0
             write_file(destination, cancel, source=source)
-            status = "保留未压缩" if ext in UNSUPPORTED_IMAGES else "复制其他文件"
-            note = "暂不支持此图片格式" if ext in UNSUPPORTED_IMAGES else "非图片，原样复制"
-            return destination, status, note, before, before
+            return destination, "保留未压缩", "暂不支持此图片格式", before, before
         with opened_context as opened:
             original_format = opened.format or ""
             if original_format not in SUPPORTED_FORMATS:
@@ -538,7 +538,7 @@ def run_batch(source, target_bytes: int = 1_000_000,
                         before = fs_path(src).stat().st_size
                         dst, status, note, before, after = process_file(
                             src, dst, target_bytes, reserved.setdefault(relative.parent, set()), cancel)
-                        shown_dst = str(dst.relative_to(output))
+                        shown_dst = str(dst.relative_to(output)) if dst is not None else ""
                         if status == "已压缩":
                             result.compressed += 1
                         elif status == "已达标":
@@ -581,7 +581,7 @@ def run_batch(source, target_bytes: int = 1_000_000,
         except Cancelled:
             result.cancelled = True
         finally:
-            summary = f"已处理 {result.processed}/{result.total}；压缩 {result.compressed}；已达标 {result.unchanged}；其他文件 {result.other}；保留未压缩 {result.preserved}；异常 {result.errors}；跳过 {result.skipped}"
+            summary = f"已处理 {result.processed}/{result.total}；压缩 {result.compressed}；已达标 {result.unchanged}；非图片已跳过 {result.other}；保留未压缩 {result.preserved}；异常 {result.errors}；跳过 {result.skipped}"
             end_status = "处理失败，副本未完整" if result.fatal_error else "已取消，副本不完整" if result.cancelled else "处理结束"
             writer.writerow(["【任务汇总】", "", end_status,
                              result.input_bytes, result.output_bytes, target_bytes, summary])

@@ -60,6 +60,7 @@ def test_gui_drop_process_and_result_folder_button(tmp_path):
     source = tmp_path / "拖入 空格 {花括号}"
     source.mkdir()
     Image.new("RGB", (120, 80), "red").save(source / "小图.jpg")
+    (source / "说明.txt").write_text("不复制", encoding="utf-8")
     app = App()
     try:
         app.update()
@@ -82,8 +83,25 @@ def test_gui_drop_process_and_result_folder_button(tmp_path):
         assert app.result is not None
         assert app.result.errors == 0
         assert app.state_text.get() == "处理完成"
+        assert app.result.other == 1
+        assert not (app.result.output / "说明.txt").exists()
         assert str(app.open_button.cget("state")) == "normal"
         assert (app.result.output / "小图.jpg").exists()
+    finally:
+        close_after_worker(app)
+
+
+def test_gui_reports_folder_with_only_non_images(tmp_path):
+    (tmp_path / "视频.mov").write_bytes(b"not an image")
+    app = App()
+    try:
+        app._set_sources([tmp_path])
+        app.start_button.invoke()
+        wait_until_finished(app)
+        assert app.result.errors == 0
+        assert app.result.other == 1
+        assert app.state_text.get() == "处理结束 · 没有可处理的图片"
+        assert not (app.result.output / "视频.mov").exists()
     finally:
         close_after_worker(app)
 

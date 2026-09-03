@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import threading
 from pathlib import Path
@@ -18,7 +19,7 @@ def picture(path, size=(100, 70), color="red", **save):
     return path
 
 
-def test_recurses_preserves_originals_and_copies_other_files(tmp_path):
+def test_recurses_preserves_originals_and_skips_other_files(tmp_path):
     source = tmp_path / "中文 资料"
     img = picture(source / "客户 一" / "照片.JPG")
     (source / "空文件夹").mkdir()
@@ -33,10 +34,54 @@ def test_recurses_preserves_originals_and_copies_other_files(tmp_path):
     assert result.errors == 0
     for rel, sha in before.items():
         assert digest(source / rel) == sha
-        assert digest(result.output / rel) == sha
+    assert digest(result.output / img.relative_to(source)) == digest(img)
+    assert not (result.output / note.name).exists()
+    assert result.other == 1
     assert result.report.is_file()
     again = run_batch(source)
     assert again.output != result.output
+
+
+def test_nested_non_images_are_not_written_or_counted_as_savings(tmp_path):
+    source = tmp_path / "混合素材"
+    nested = source / "活动" / "第二天" / "摄影组"
+    nested.mkdir(parents=True)
+    photo = picture(nested / "没有后缀", format="JPEG")
+    wrong_suffix = picture(nested / "真实图片.mp4", format="PNG")
+    non_images = [nested / name for name in ("视频.mov", "说明.pdf", "清单.xlsx", "无后缀文档")]
+    for path in non_images:
+        path.write_bytes(b"not an image" * 1000)
+    before = {p: digest(p) for p in (photo, wrong_suffix, *non_images)}
+    result = run_batch(source)
+    assert result.unchanged == 2
+    assert result.other == 4
+    assert result.errors == result.skipped == result.saved_bytes == 0
+    assert result.output_bytes == photo.stat().st_size + wrong_suffix.stat().st_size
+    for path in non_images:
+        assert not (result.output / path.relative_to(source)).exists()
+    with result.report.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    ignored = [row for row in rows if row["状态"] == "非图片已跳过"]
+    assert len(ignored) == 4
+    assert all(row["输出文件"] == "" and row["新大小(字节)"] == "0" for row in ignored)
+    for row in rows:
+        if row["状态"] == "已达标":
+            with Image.open(result.output / row["输出文件"]) as image:
+                image.load()
+    assert all(digest(path) == sha for path, sha in before.items())
+
+
+def test_unsupported_image_is_still_preserved_but_document_is_skipped(tmp_path):
+    source = tmp_path / "原始素材"
+    source.mkdir()
+    raw = source / "相机.CR3"
+    raw.write_bytes(b"unsupported raw placeholder")
+    note = source / "备注.txt"
+    note.write_text("不复制", encoding="utf-8")
+    result = run_batch(source)
+    assert result.preserved == result.other == 1
+    assert digest(result.output / raw.name) == digest(raw)
+    assert not (result.output / note.name).exists()
 
 
 def test_large_20mb_image_meets_limit_and_remains_readable(tmp_path):

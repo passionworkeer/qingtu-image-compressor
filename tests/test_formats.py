@@ -47,7 +47,9 @@ def test_csv_report_does_not_overwrite_input_and_escapes_formulas(tmp_path):
     Image.new("RGB", (30, 20), "red").save(source / "=1+1.jpg")
     result = run_batch(source)
     assert result.report.name != "_压缩报告.csv"
-    assert (result.output / "_压缩报告.csv").read_bytes() == b"original report"
+    assert (source / "_压缩报告.csv").read_bytes() == b"original report"
+    assert not (result.output / "_压缩报告.csv").exists()
+    assert result.other == 1
     with result.report.open(encoding="utf-8-sig", newline="") as handle:
         records = list(csv.DictReader(handle))
     assert any(r["原文件"] == "'=1+1.jpg" for r in records)

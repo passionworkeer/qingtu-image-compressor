@@ -26,6 +26,9 @@ with tempfile.TemporaryDirectory() as folder:
     picture.parent.mkdir()
     Image.effect_noise((2400, 1800), 85).convert("RGB").save(picture, quality=100)
     before = hashlib.sha256(picture.read_bytes()).hexdigest()
+    non_images = [source / "深层" / "视频.mov", source / "说明.txt"]
+    for path in non_images:
+        path.write_bytes(b"not an image" * 1000)
     for fmt, suffix in (("HEIF", "heic"), ("WEBP", "webp"), ("AVIF", "avif"), ("PNG", "png")):
         with Image.effect_noise((1000, 800), 90).convert("RGB") as sample:
             sample.save(source / f"编码器.{suffix}", format=fmt, quality=100)
@@ -34,7 +37,12 @@ with tempfile.TemporaryDirectory() as folder:
                           "--result-json", str(result_path)], timeout=180)
     assert run.returncode == 0
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    assert result["processed"] == result["total"] == 5 and result["errors"] == 0
+    assert result["processed"] == result["total"] == 7 and result["errors"] == 0
+    assert result["compressed"] == 5 and result["other"] == 2
+    assert result["skipped"] == 0
+    for path in non_images:
+        assert not (Path(result["output"]) / path.relative_to(source)).exists()
+        assert path.read_bytes() == b"not an image" * 1000
     assert hashlib.sha256(picture.read_bytes()).hexdigest() == before
     output = next((Path(result["output"]) / "深层").glob("*.jpg"))
     assert output.stat().st_size <= 100_000
@@ -42,6 +50,8 @@ with tempfile.TemporaryDirectory() as folder:
         read.load()
     with Path(result["report"]).open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
+    ignored = [row for row in rows if row["状态"] == "非图片已跳过"]
+    assert len(ignored) == 2 and all(row["输出文件"] == "" for row in ignored)
     for row in rows:
         if not row["输出文件"]:
             continue

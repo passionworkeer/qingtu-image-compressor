@@ -317,7 +317,7 @@ class App(TkinterDnD.Tk):
                 status = event["status"]
                 tag = "good" if status in ("已压缩", "已达标") else "warning" if status in ("保留未压缩", "跳过") else "error" if status == "异常" else ""
                 item = self.table.insert("", "end", values=(event["path"], file_size(event["before"]),
-                                                          file_size(event["after"]), status), tags=(tag,))
+                                                          file_size(event["after"]) if event["output"] else "—", status), tags=(tag,))
                 self.row_notes[item] = event["path"] + "：" + event["note"]
                 # Keep large batches responsive. The CSV always contains every result.
                 rows = self.table.get_children()
@@ -368,10 +368,12 @@ class App(TkinterDnD.Tk):
                 self.state_text.set(f"处理结束 · {caution} 项需查看")
             elif r.total == 0:
                 self.state_text.set("处理结束 · 文件夹中没有文件")
+            elif r.other == r.total:
+                self.state_text.set("处理结束 · 没有可处理的图片")
             else:
                 self.state_text.set("处理完成")
             self.status_label.configure(fg="#B42318" if r.fatal_error else "#B45309" if caution or r.cancelled else "#087A61")
-            self.detail_text.set(r.fatal_error or f"压缩 {r.compressed} · 已达标 {r.unchanged} · 其他文件 {r.other} · 保留未压缩 {r.preserved} · 异常 {r.errors} · 跳过 {r.skipped}。完整明细见 CSV 报告。")
+            self.detail_text.set(r.fatal_error or f"压缩 {r.compressed} · 已达标 {r.unchanged} · 非图片已跳过 {r.other} · 保留未压缩 {r.preserved} · 异常 {r.errors} · 跳过 {r.skipped}。完整明细见 CSV 报告。")
             self.output_text.set("结果位置：" + str(r.output))
             if not r.cancelled and not r.fatal_error:
                 self.progress.configure(value=max(r.total, 1))
