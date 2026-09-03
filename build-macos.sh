@@ -30,5 +30,15 @@ iconutil -c icns "$ICONSET" -o .build-macos/app.icns
 APP="$OUTPUT_DIR/轻图图片压缩.app"
 codesign --deep --force --sign - "$APP"
 ARCH=$(uname -m)
-ditto -c -k --keepParent --sequesterRsrc "$APP" "$OUTPUT_DIR/轻图图片压缩-macOS-$ARCH.zip"
+ZIP="$OUTPUT_DIR/轻图图片压缩-macOS-$ARCH.zip"
+ditto -c -k --keepParent --sequesterRsrc "$APP" "$ZIP"
+
+# Verify the exact archive that users receive, including its Unicode app name.
+VERIFY_DIR=".build-macos/package-check"
+rm -rf "$VERIFY_DIR"
+mkdir -p "$VERIFY_DIR"
+ditto -x -k "$ZIP" "$VERIFY_DIR"
+codesign --verify --deep --strict "$VERIFY_DIR/轻图图片压缩.app"
+test -x "$VERIFY_DIR/轻图图片压缩.app/Contents/MacOS/轻图图片压缩"
+rm -rf "$VERIFY_DIR"
 echo "Built $APP ($ARCH)"
