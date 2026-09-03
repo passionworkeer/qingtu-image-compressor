@@ -1,8 +1,35 @@
 import time
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from PIL import Image
 from app import App
+
+
+def test_destroyed_window_can_be_collected_by_next_worker():
+    # Isolate this regression: the broken version aborts inside Tcl, bypassing pytest.
+    code = '''
+import gc, sys, threading
+from app import App
+errors = []
+sys.unraisablehook = lambda event: errors.append(str(event.exc_value))
+gc.disable()
+window = App()
+window.update()
+window.destroy()
+del window
+worker = threading.Thread(target=gc.collect)
+worker.start()
+worker.join(timeout=20)
+assert not worker.is_alive()
+assert not errors, errors
+'''
+    result = subprocess.run([sys.executable, "-c", code],
+                            cwd=Path(__file__).resolve().parents[1],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def wait_until_finished(app, timeout=60):

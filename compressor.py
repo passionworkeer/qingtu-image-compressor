@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import stat
+import struct
 import tempfile
 import threading
 import unicodedata
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageCms, ImageOps, PngImagePlugin, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 
 register_heif_opener(thumbnails=False)
@@ -37,6 +38,8 @@ CANONICAL_SUFFIX = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "BMP": ".bmp
                     "DIB": ".dib", "TIFF": ".tif", "GIF": ".gif", "HEIF": ".heic",
                     "AVIF": ".avif"}
 FATAL_IO = {errno.ENOSPC, getattr(errno, "EDQUOT", 122), errno.EROFS}
+MIN_QUALITY = 82
+MAX_QUALITY = 95
 
 
 class Cancelled(Exception):
@@ -67,6 +70,18 @@ def check_cancel(cancel: threading.Event) -> None:
         raise Cancelled()
 
 
+def fs_path(path: Path) -> Path:
+    """Use extended Windows paths for I/O; keep ordinary paths in UI and reports."""
+    if os.name != "nt":
+        return path
+    text = os.path.abspath(path)
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text[2:])
+    return Path("\\\\?\\" + text)
+
+
 def is_link_like(entry, info) -> bool:
     """Skip path redirects, while allowing ordinary hydrated cloud files."""
     if entry.is_symlink():
@@ -86,9 +101,9 @@ def scan_folder(source: Path, cancel: threading.Event, emit: Callable):
         folder = pending.pop()
         relative = folder.relative_to(source)
         try:
-            with os.scandir(folder) as iterator:
+            with os.scandir(fs_path(folder)) as iterator:
                 entries = sorted(iterator, key=lambda e: e.name.casefold())
-            reserved[relative] = {e.name.casefold() for e in entries}
+            reserved[relative] = {name_key(e.name) for e in entries}
         except OSError as exc:
             items.append((relative, "error", str(exc)))
             continue
@@ -140,7 +155,7 @@ def new_output(parent: Path, source_name: str) -> Path:
         name = base if index == 1 else f"{base} ({index})"
         output = parent / name
         try:
-            output.mkdir()
+            fs_path(output).mkdir()
             return output
         except FileExistsError:
             index += 1
@@ -148,7 +163,7 @@ def new_output(parent: Path, source_name: str) -> Path:
 
 def reserve_name(name: str, occupied: set[str]) -> str:
     path = Path(name)
-    candidate = name
+    candidate = shortened_name(path.stem, path.suffix)
     index = 1
     while name_key(candidate) in occupied:
         tail = "_压缩" if index == 1 else f"_压缩{index}"
@@ -191,6 +206,8 @@ def publish_staged(temporary: Path, destination: Path, cancel: threading.Event,
 def write_file(destination: Path, cancel: threading.Event, *, data: bytes | None = None,
                source: Path | None = None) -> None:
     """Publish a complete file only. Windows rename refuses an existing target."""
+    destination = fs_path(destination)
+    source = fs_path(source) if source else None
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -225,6 +242,8 @@ def prepare_image(opened: Image.Image) -> tuple[Image.Image, bytes | None]:
     profile = im.info.get("icc_profile")
     if profile:
         srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+        if im.mode == "RGB" and has_alpha:
+            im = im.convert("RGBA")  # Materialize PNG tRNS before LittleCMS transforms RGB.
         # CMYK and LAB must be converted with their source profile before RGB conversion.
         if im.mode not in ("RGB", "RGBA", "CMYK", "LAB"):
             im = im.convert(mode)
@@ -238,39 +257,86 @@ def prepare_image(opened: Image.Image) -> tuple[Image.Image, bytes | None]:
     return im, profile
 
 
-def encode_image(im: Image.Image, fmt: str, quality: int, profile: bytes | None) -> bytes:
+def png_colour_info(info) -> PngImagePlugin.PngInfo:
+    chunks = PngImagePlugin.PngInfo()
+    if "gamma" in info:
+        chunks.add(b"gAMA", struct.pack(">I", round(info["gamma"] * 100000)))
+    if "chromaticity" in info:
+        chunks.add(b"cHRM", struct.pack(">8I", *(round(v * 100000) for v in info["chromaticity"])))
+    if "srgb" in info:
+        chunks.add(b"sRGB", bytes([info["srgb"]]))
+    return chunks
+
+
+def high_bit_depth(opened: Image.Image, source: Path) -> bool:
+    if opened.mode in {"I", "F"} or opened.mode.startswith("I;16"):
+        return True
+    if opened.info.get("bit_depth", 8) > 8:
+        return True
+    if opened.format == "TIFF":
+        bits = opened.tag_v2.get(258, (8,))
+        if max(bits if isinstance(bits, tuple) else (bits,)) > 8:
+            return True
+    if opened.format == "PNG":
+        with source.open("rb") as handle:
+            header = handle.read(25)
+        return len(header) == 25 and header[24] > 8
+    return False
+
+
+def encode_image(im: Image.Image, fmt: str, quality: int, profile: bytes | None,
+                 pnginfo=None) -> bytes:
     options = {"icc_profile": profile} if profile else {}
     if fmt == "JPEG":
-        options.update(quality=quality, optimize=True, progressive=True, subsampling=2)
+        options.update(quality=quality, optimize=True, progressive=True, subsampling=0)
     elif fmt == "WEBP":
-        options.update(quality=quality, method=4)
+        options.update(quality=quality, method=6, exact=True)
     else:
-        options.update(optimize=True, compress_level=9)
+        options.update(optimize=True, compress_level=9, pnginfo=pnginfo)
     with io.BytesIO() as buffer:
-        im.save(buffer, format=fmt, **options)
+        try:
+            im.save(buffer, format=fmt, **options)
+        except OSError as exc:
+            if fmt != "JPEG" or "broken data stream" not in str(exc):
+                raise
+            # Noisy 4:4:4 images can exceed Pillow's optimized JPEG buffer.
+            # Baseline coding uses the same quantization/colour sampling and
+            # changes storage efficiency, not the requested pixel quality.
+            buffer.seek(0)
+            buffer.truncate()
+            im.save(buffer, format=fmt, **dict(options, optimize=False, progressive=False))
         return buffer.getvalue()
 
 
 def fit_image(im: Image.Image, fmt: str, profile: bytes | None, target: int,
-              cancel: threading.Event) -> tuple[bytes, tuple[int, int]]:
+              cancel: threading.Event, pnginfo=None) -> tuple[bytes, tuple[int, int]]:
     """Search quality first, then resize from original pixels (no repeated JPEG loss)."""
+    if fmt == "WEBP":
+        check_cancel(cancel)
+        with io.BytesIO() as buffer:
+            im.save(buffer, format="WEBP", lossless=True, quality=90, method=6,
+                    exact=True, **({"icc_profile": profile} if profile else {}))
+            lossless = buffer.getvalue()
+        if len(lossless) <= target:
+            return lossless, im.size
+        del lossless
     current = im
     try:
         for _ in range(35):
             check_cancel(cancel)
-            high_data = encode_image(current, fmt, 95, profile)
+            high_data = encode_image(current, fmt, MAX_QUALITY, profile, pnginfo)
             if len(high_data) <= target:
                 return high_data, current.size
             if fmt in {"JPEG", "WEBP"}:
                 check_cancel(cancel)
-                low_data = encode_image(current, fmt, 60, profile)
+                low_data = encode_image(current, fmt, MIN_QUALITY, profile, pnginfo)
                 if len(low_data) <= target:
                     best = low_data
-                    low, high = 61, 94
+                    low, high = MIN_QUALITY + 1, MAX_QUALITY - 1
                     while low <= high:
                         check_cancel(cancel)
                         middle = (low + high) // 2
-                        candidate = encode_image(current, fmt, middle, profile)
+                        candidate = encode_image(current, fmt, middle, profile, pnginfo)
                         if len(candidate) <= target:
                             best, low = candidate, middle + 1
                         else:
@@ -293,6 +359,7 @@ def fit_image(im: Image.Image, fmt: str, profile: bytes | None, target: int,
 
 def process_file(source: Path, destination: Path, target: int, occupied: set[str],
                  cancel: threading.Event):
+    source = fs_path(source)
     before = source.stat().st_size
     ext = source.suffix.lower()
     with warnings.catch_warnings():
@@ -329,7 +396,27 @@ def process_file(source: Path, destination: Path, target: int, occupied: set[str
                     note += f"；扩展名修正为 {CANONICAL_SUFFIX[original_format]}"
                 return destination, "已达标", note, before, before
             check_cancel(cancel)
+            if high_bit_depth(opened, source):
+                write_file(destination, cancel, source=source)
+                return destination, "保留未压缩", "高位深图片保留原件，避免降至 8 位导致色阶损失；超过目标大小", before, before
+            pnginfo = png_colour_info(opened.info) if original_format == "PNG" else None
+            if original_format == "PNG":
+                # Preserve palette, transparency and colour metadata before considering resize.
+                with ImageOps.exif_transpose(opened) as native:
+                    keep = {key: value for key, value in native.info.items()
+                            if key in {"transparency", "icc_profile"}}
+                    native.info.clear()
+                    native.info.update(keep)
+                    lossless = encode_image(native, "PNG", MAX_QUALITY, keep.get("icc_profile"), pnginfo)
+                if len(lossless) <= target:
+                    if ext != ".png":
+                        destination = destination.with_name(reserve_name(destination.stem + ".png", occupied))
+                    write_file(destination, cancel, data=lossless, source=source)
+                    return destination, "已压缩", f"{opened.width}×{opened.height}；原尺寸无损优化（方向已校正）", before, len(lossless)
+                del lossless
             im, profile = prepare_image(opened)
+            if profile:
+                pnginfo = None  # Pixels/profile were converted to sRGB together.
     try:
         if original_format == "PNG":
             fmt, suffix = "PNG", ".png"
@@ -340,7 +427,7 @@ def process_file(source: Path, destination: Path, target: int, occupied: set[str
         else:
             fmt, suffix = "JPEG", ".jpg"
         original_size = im.size
-        data, size = fit_image(im, fmt, profile, target, cancel)
+        data, size = fit_image(im, fmt, profile, target, cancel, pnginfo)
         if len(data) > target:
             raise ValueError("编码结果超过目标大小")
         same_format = original_format == fmt and (
@@ -351,6 +438,10 @@ def process_file(source: Path, destination: Path, target: int, occupied: set[str
             destination = destination.with_name(name)
         write_file(destination, cancel, data=data, source=source)
         note = f"{original_size[0]}×{original_size[1]} → {size[0]}×{size[1]}"
+        if fmt == "JPEG":
+            note += f"；质量 {MIN_QUALITY}–{MAX_QUALITY}，4:4:4 色彩采样"
+        elif fmt == "WEBP":
+            note += f"；先尝试无损，必要时质量 {MIN_QUALITY}–{MAX_QUALITY}"
         if not same_format:
             note += f"；转为 {fmt}"
         return destination, "已压缩", note, before, len(data)
@@ -366,22 +457,26 @@ def csv_cell(value):
 def normalize_sources(source) -> tuple[Path, str, list[Path] | None]:
     if isinstance(source, (str, os.PathLike)):
         raw = Path(source).expanduser().absolute()
-        if raw.is_symlink():
+        try:
+            info = fs_path(raw).lstat()
+        except FileNotFoundError:
+            raise ValueError("请选择存在的图片或文件夹") from None
+        if is_link_like(fs_path(raw), info):
             raise ValueError("不能直接处理链接，请选择其实际文件或文件夹")
         path = raw.resolve()
-        if path.is_dir():
+        if fs_path(path).is_dir():
             return path, path.name, None
-        if path.is_file():
+        if fs_path(path).is_file():
             return path.parent, path.stem, [path]
         raise ValueError("请选择存在的图片或文件夹")
     try:
         raw_paths = [Path(item).expanduser().absolute() for item in source]
-        if any(path.is_symlink() for path in raw_paths):
+        if any(is_link_like(fs_path(path), fs_path(path).lstat()) for path in raw_paths):
             raise ValueError("不能直接处理链接，请选择其实际文件或文件夹")
         paths = list(dict.fromkeys(path.resolve() for path in raw_paths))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, FileNotFoundError):
         raise ValueError("请选择图片或文件夹") from None
-    if not paths or any(not path.is_file() for path in paths):
+    if not paths or any(not fs_path(path).is_file() for path in paths):
         raise ValueError("一次可选择一个文件夹，或同一目录中的一张/多张图片")
     parents = {path.parent for path in paths}
     if len(parents) != 1:
@@ -404,13 +499,13 @@ def run_batch(source, target_bytes: int = 1_000_000,
     else:
         folders = []
         items = [(path.relative_to(root), "file", "") for path in sorted(selected, key=lambda p: name_key(p.name))]
-        reserved = {Path("."): {name_key(entry.name) for entry in root.iterdir()}}
+        reserved = {Path("."): {name_key(entry.name) for entry in fs_path(root).iterdir()}}
     check_cancel(cancel)
     output = new_output(root if selected is not None else root.parent, source_name)
     report = output / reserve_name("_压缩报告.csv", reserved.setdefault(Path("."), set()))
     result = BatchResult(output=output, report=report, total=len(items))
     emit({"type": "start", "total": result.total, "output": str(output)})
-    with report.open("x", encoding="utf-8-sig", newline="") as handle:
+    with fs_path(report).open("x", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["原文件", "输出文件", "状态", "原大小(字节)", "新大小(字节)",
                          "目标大小(字节)", "说明"])
@@ -418,11 +513,16 @@ def run_batch(source, target_bytes: int = 1_000_000,
             for folder in folders:
                 check_cancel(cancel)
                 try:
-                    (output / folder).mkdir(parents=True, exist_ok=True)
+                    fs_path(output / folder).mkdir(parents=True, exist_ok=True)
                 except OSError as exc:
                     result.errors += 1
                     writer.writerow([csv_cell(folder), "", "异常", 0, 0, target_bytes, csv_cell(exc)])
+                    if exc.errno in FATAL_IO:
+                        result.fatal_error = f"无法创建目录，任务已停止：{exc}"
+                        break
             for relative, kind, detail in items:
+                if result.fatal_error:
+                    break
                 check_cancel(cancel)
                 emit({"type": "current", "path": str(relative)})
                 src, dst = root / relative, output / relative
@@ -435,7 +535,7 @@ def run_batch(source, target_bytes: int = 1_000_000,
                     shown_dst = ""
                 else:
                     try:
-                        before = src.stat().st_size
+                        before = fs_path(src).stat().st_size
                         dst, status, note, before, after = process_file(
                             src, dst, target_bytes, reserved.setdefault(relative.parent, set()), cancel)
                         shown_dst = str(dst.relative_to(output))

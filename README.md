@@ -32,7 +32,7 @@ python mac_smoke.py
 
 GitHub Actions 工作流 `.github/workflows/build-macos.yml` 会在 `macos-15`（arm64）和 `macos-15-intel`（x86_64）分别执行全部测试、打包、ad-hoc codesign、命令行压缩烟测和 GUI 启动烟测。输出两个按 CPU 区分的 ZIP。
 
-当前没有 Apple Developer ID 证书，因此不是 Apple 公证包。从浏览器下载后，首次启动可能需要在 Finder 中右键应用并选“打开”；正式做到首次直接双击无 Gatekeeper 提示，需要提供 Apple Developer Program 的 Developer ID Application 证书并执行 notarization。
+当前没有 Apple Developer ID 证书，因此不是 Apple 公证包。首次启动如被拦截，先尝试打开应用，再到“系统设置 → 隐私与安全性 → 仍要打开”确认（公司管理的 Mac 可能需 IT 放行）。正式做到首次直接双击无 Gatekeeper 提示，需要 Developer ID Application 证书并执行 notarization。参见 [Apple 官方说明](https://support.apple.com/en-us/102445)。
 
 界面测试会短暂打开 Tk 窗口，覆盖 Tcl 格式的文件夹/单图拖入、跨目录多图拒绝、开始按钮、后台处理、620–880 像素窗口高度和结果状态。核心测试覆盖 20 MB 大图、28 层目录 56 张图片、无后缀及错后缀图片、原件哈希、透明度、旋转、ICC、GIF/多页保留、HEIC/AVIF/WebP/TIFF、云盘 reparse、exFAT 发布回退、同名冲突、磁盘满停止、坏图继续及取消。
 
@@ -52,9 +52,15 @@ Start-Process -FilePath '.\dist\图片压缩工具.exe' -ArgumentList '--batch "
 - build.ps1：先运行测试，再用 PyInstaller 打包。
 - app.ico：应用图标。
 
-JPEG/WebP 使用质量 60–95 搜索；达到下限仍超限时，按目标与实际字节数的平方根估算缩放比例，使用 LANCZOS 重采样，并重新搜索质量。PNG 保留透明度，以无损编码和必要的缩放满足体积要求。原始像素用于每次缩放，避免重复 JPEG 解码损失。支持文件只逐张处理，不把整批解码到内存。
+应用流程为本项目编写，未复制某个 GitHub 压图应用。底层使用 Pillow 的 JPEG/libjpeg、WebP/libwebp、PNG 等编解码器，以及 pillow-heif/libheif。Windows 和 Mac 使用同一份 compressor.py，只有系统路径、文件发布方式、字体、文件夹打开方式与构建方式不同；底层二进制库差异可能导致结果字节数略有差别。
 
-原文件写权限永不需要；输出目录通过独占 mkdir 防止重复运行冲突。转换格式时预留所有源文件名和目录名。图片先写临时文件，完成后重命名发布。Windows 的 rename 不覆盖已存在目标。软链接与 Windows 重解析点不跟随，错误在逐项报告中可见。
+JPEG/WebP 默认在质量 82–95 之间搜索；JPEG 使用 4:4:4 采样，减少彩色细线/文字的色彩损失。质量值不是保真百分比。PNG 先保留调色板、透明度、ICC/gamma 等色彩信息做原尺寸无损优化，WebP 先尝试无损编码。仍超限时，按目标与实际字节数的平方根估算缩放比例，使用 LANCZOS 重采样，并重新搜索质量。每次缩放取自原始解码像素，避免重复 JPEG 解码损失。只逐张处理，不把整批解码到内存。
+
+较高质量下限可能需要更小的输出尺寸，这是编码失真与空间细节的取舍，不保证每张图的主观观感都优于旧版。20 MB 压到 1 MB 不能承诺无损；含小字的账单、条码应检查压后可读性，必要时把目标改为 2–3 MB。
+
+检测到的高位深 PNG/TIFF/HEIF 保留原件并提示，避免简单降到 8 位使色阶截断。AVIF 当前按 Pillow 的 8 位 RGB(A) 解码路径处理，不保证保留 HDR/高位深；专业 HDR/印刷流程应使用原图。动图、多页图也保留原件，因此这些项可能超过目标大小。
+
+输出目录通过独占 mkdir 防止重复运行冲突，转换文件名统一按 NFC/casefold 预留。Windows 内部 I/O 使用扩展长路径，界面和报告保持普通路径。软链接/目录联接不跟随；普通云文件可读。图片先写临时文件，Windows rename/POSIX hardlink 发布不覆盖旧文件；exFAT 等不支持硬链接时使用独占创建复制，异常/取消会清理半成品（该回退不具备断电原子性）。
 
 ## 技术资料
 

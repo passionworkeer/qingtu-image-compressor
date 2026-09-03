@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
-from compressor import BatchResult, Cancelled, run_batch
+from compressor import BatchResult, Cancelled, fs_path, run_batch
 
 BLUE = "#4F46E5"
 INK = "#1E1B4B"
@@ -60,7 +60,7 @@ class App(TkinterDnD.Tk):
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
             tkfont.nametofont(name).configure(family=self.font_family, size=10)
         initial = Path(folder).expanduser() if folder else None
-        self.sources = [initial] if initial and initial.exists() else []
+        self.sources = [initial] if initial and fs_path(initial).exists() else []
         self.path = tk.StringVar(value=str(initial) if initial else "")
         self.target = tk.StringVar(value="1")
         self.state_text = tk.StringVar(value="准备就绪")
@@ -230,8 +230,8 @@ class App(TkinterDnD.Tk):
             return "break"
         paths = self.tk.splitlist(event.data)
         candidates = [Path(path) for path in paths]
-        valid = (len(candidates) == 1 and candidates[0].is_dir()) or (
-            candidates and all(path.is_file() for path in candidates)
+        valid = (len(candidates) == 1 and fs_path(candidates[0]).is_dir()) or (
+            candidates and all(fs_path(path).is_file() for path in candidates)
             and len({path.parent.resolve() for path in candidates}) == 1)
         if not valid:
             messagebox.showinfo("请选择图片或文件夹", "可拖入一个文件夹，或同一目录中的一张/多张图片。", parent=self)
@@ -246,7 +246,7 @@ class App(TkinterDnD.Tk):
     def _start(self):
         if self.busy:
             return
-        if not self.sources or any(not path.exists() for path in self.sources):
+        if not self.sources or any(not fs_path(path).exists() for path in self.sources):
             messagebox.showerror("文件不存在", "所选图片或文件夹已移动，请重新选择。", parent=self)
             return
         selection = self.sources[0] if len(self.sources) == 1 else list(self.sources)
@@ -405,6 +405,14 @@ class App(TkinterDnD.Tk):
             self._cancel()
         else:
             self.destroy()
+
+    def destroy(self):
+        super().destroy()
+        # Break App -> widget/Variable -> App cycles on the Tk thread. Otherwise
+        # a later worker's GC can finalize the old Tcl interpreter off-thread.
+        for name, value in tuple(vars(self).items()):
+            if isinstance(value, (tk.Misc, tk.Variable, tk.Image)):
+                setattr(self, name, None)
 
 
 def main():
