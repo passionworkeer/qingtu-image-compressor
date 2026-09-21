@@ -1,9 +1,47 @@
+# Python & Bytecode
 __pycache__/
-.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# PyInstaller & Build Artifacts
+build/
 .build/
 .build-macos/
 dist/
 dist-macos/
 *.spec
-*.pyc
+*.manifest
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Operating System files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

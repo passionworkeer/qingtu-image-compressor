@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qingtu-image-compressor"
+version = "1.0.0"
+description = "Lightweight, cross-platform batch image compressor with Tkinter GUI and CLI (Windows & macOS)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "passionworkeer", email = "passionworkeer@users.noreply.github.com" }
+]
+keywords = [
+    "image-compressor",
+    "image-optimizer",
+    "batch-processing",
+    "gui",
+    "cli",
+    "cross-platform",
+    "pillow",
+    "heic",
+    "avif",
+    "webp"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Utilities"
+]
+dependencies = [
+    "Pillow>=10.0.0",
+    "pillow-heif>=0.15.0",
+    "tkinterdnd2>=0.4.0"
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0.0",
+    "pytest>=8.0.0"
+]
+test = [
+    "pytest>=8.0.0"
+]
+
+[project.scripts]
+qingtu = "app:main"
+
+[project.urls]
+Homepage = "https://github.com/passionworkeer/qingtu-image-compressor"
+Repository = "https://github.com/passionworkeer/qingtu-image-compressor"
+Issues = "https://github.com/passionworkeer/qingtu-image-compressor/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

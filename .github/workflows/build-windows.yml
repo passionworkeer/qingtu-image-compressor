@@ -1,0 +1,29 @@
+name: 构建并验证 Windows 应用
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装固定版本依赖
+        run: python -m pip install -r requirements-build.txt
+      - name: 测试并打包 EXE
+        shell: powershell
+        run: .\build.ps1 -Python python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 轻图图片压缩-Windows-x64
+          path: dist/轻图图片压缩.exe
+          if-no-files-found: error
+          retention-days: 30
